@@ -189,20 +189,26 @@ class SunsetScheduler:
             self.logger.error(f"Failed to process images: {e}")
             return None
             
-    def upload_to_youtube(self, video_path: Path, target_date: date) -> bool:
+    def upload_to_youtube(self, video_path: Path, target_date: date, 
+                         actual_start_time: datetime = None, actual_end_time: datetime = None) -> bool:
         """
         Upload video to YouTube
         
         Args:
             video_path: Path to video file
             target_date: Date the video was captured
+            actual_start_time: Actual start time of capture (optional, defaults to calculated sunset window)
+            actual_end_time: Actual end time of capture (optional, defaults to calculated sunset window)
             
         Returns:
             True if upload successful, False otherwise
         """
         try:
-            # Get capture times for metadata
-            start_time, end_time = self.sunset_calc.get_capture_window(target_date)
+            # Use actual capture times if provided, otherwise use calculated sunset window
+            if actual_start_time and actual_end_time:
+                start_time, end_time = actual_start_time, actual_end_time
+            else:
+                start_time, end_time = self.sunset_calc.get_capture_window(target_date)
             
             # Upload video
             video_id = self.youtube_uploader.upload_video(
@@ -408,8 +414,8 @@ class SunsetScheduler:
             self.logger.error("Video processing failed")
             return False
             
-        # Upload to YouTube
-        upload_success = self.upload_to_youtube(video_path, target_date)
+        # Upload to YouTube with actual capture times
+        upload_success = self.upload_to_youtube(video_path, target_date, start_time, end_time)
         if not upload_success:
             self.logger.warning("YouTube upload failed, but workflow completed")
             

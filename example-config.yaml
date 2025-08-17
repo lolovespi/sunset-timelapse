@@ -1,19 +1,19 @@
 # Sunset Timelapse Configuration
 # Location settings
 location:
-  city: "Pelham"
+  city: "Birmingham"
   state: "AL"
   country: "USA"
-  latitude: 33.2856
-  longitude: -86.8097
+  latitude: 33.5186
+  longitude: -86.8104
   timezone: "America/Chicago"
 
 # Camera settings
 camera:
-  ip: "192.168.6.44"
-  username: "apiuser"
-  # Password should be set via environment variable CAMERA_PASSWORD
-  onvif_port: 8000
+  ip: "192.168.6.44" # Change to your camera's IP address
+  username: "admin" #recommend adding a separate user to read only camera access 
+  # Password should be set via environment variable CAMERA_PASSWORD. Ensure that permissions changed to 600
+  onvif_port: 8000 #no longer used. onvif doesn't work consistently
   rtsp_port: 554
   model: "RLC810-WA"
 
@@ -37,7 +37,8 @@ video:
 
 # Storage settings
 storage:
-  base_path: "/Users/lolovespi/Documents/GitHub/sunset-timelapse/data"  # Updated for Mac
+  base_path: "/Users/<USER>/Documents/GitHub/sunset-timelapse/data"  # Sample for Mac - change <USER> to your username
+  #base_path: "/home/pi/sunset_timelapse" #Sample for Raspberry Pi
   images_subdir: "images"
   videos_subdir: "videos"
   logs_subdir: "logs"
@@ -49,10 +50,10 @@ storage:
 youtube:
   # All sensitive data via environment variables
   # GOOGLE_APPLICATION_CREDENTIALS should point to service account JSON
-  channel_name: "Mont Vaughn Purvis"
-  video_title_format: "Sunset {date}"  # {date} will be replaced with MM/DD/YY
+  channel_name: "Your Channel Name" # Change to your actual YouTube channel name
+  video_title_format: "Sunset {date}"  # {date} will be replaced with MM/DD/YY 
   description_template: |
-    Daily sunset timelapse from Pelham, Alabama
+    Daily sunset timelapse from <LOCATION>
     Captured on {date} from {start_time} to {end_time}
     
     Camera: Reolink RLC810-WA
