@@ -1,0 +1,384 @@
+"""
+YouTube Uploader
+Handles uploading timelapse videos to YouTube using Google API
+"""
+
+import logging
+import os
+from datetime import datetime, date
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+import json
+
+try:
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaFileUpload
+    GOOGLE_AVAILABLE = True
+except ImportError:
+    logging.warning("Google API libraries not available. YouTube upload will be disabled.")
+    GOOGLE_AVAILABLE = False
+
+from config_manager import get_config
+
+
+class YouTubeUploader:
+    """Handles YouTube video uploads"""
+    
+    # OAuth 2.0 scopes for YouTube uploads and channel access
+    SCOPES = ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly']
+    
+    def __init__(self):
+        """Initialize YouTube uploader"""
+        self.config = get_config()
+        self.logger = logging.getLogger(__name__)
+        self.service = None
+        self._authenticated = False
+        
+        if not GOOGLE_AVAILABLE:
+            self.logger.error("Google API libraries not available. Install google-api-python-client")
+            return
+            
+        # YouTube settings from config
+        self.channel_name = self.config.get('youtube.channel_name', 'Unknown Channel')
+        self.title_format = self.config.get('youtube.video_title_format', 'Sunset {date}')
+        self.description_template = self.config.get('youtube.description_template', '')
+        self.privacy_status = self.config.get('youtube.privacy_status', 'public')
+        self.category_id = self.config.get('youtube.category_id', 22)
+        
+        self.logger.info("YouTube uploader initialized")
+        
+    def authenticate(self) -> bool:
+        """
+        Authenticate with YouTube API using service account or OAuth
+        
+        Returns:
+            True if authentication successful, False otherwise
+        """
+        if not GOOGLE_AVAILABLE:
+            return False
+            
+        try:
+            creds = None
+            token_file = 'youtube_token.json'
+            
+            # Check for existing token
+            if os.path.exists(token_file):
+                creds = Credentials.from_authorized_user_file(token_file, self.SCOPES)
+                
+            # If there are no valid credentials, get new ones
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    # Refresh existing credentials
+                    self.logger.info("Refreshing YouTube credentials")
+                    creds.refresh(Request())
+                else:
+                    # Get new credentials via OAuth flow
+                    credentials_path = self.config.get_google_credentials_path()
+                    
+                    if not credentials_path or not os.path.exists(credentials_path):
+                        self.logger.error("Google credentials file not found. Set GOOGLE_APPLICATION_CREDENTIALS")
+                        return False
+                        
+                    self.logger.info("Starting OAuth flow for YouTube authentication")
+                    flow = InstalledAppFlow.from_client_secrets_file(credentials_path, self.SCOPES)
+                    creds = flow.run_local_server(port=0)
+                    
+                # Save credentials for next run
+                with open(token_file, 'w') as token:
+                    token.write(creds.to_json())
+                    
+            # Build YouTube service
+            self.service = build('youtube', 'v3', credentials=creds)
+            self._authenticated = True
+            
+            # Test authentication by getting channel info
+            channel_response = self.service.channels().list(
+                part='snippet',
+                mine=True
+            ).execute()
+            
+            if 'items' in channel_response and channel_response['items']:
+                channel = channel_response['items'][0]
+                channel_title = channel['snippet']['title']
+                self.logger.info(f"Successfully authenticated with YouTube channel: {channel_title}")
+                return True
+            else:
+                self.logger.error(f"No YouTube channel found for authenticated account. Response: {channel_response}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"YouTube authentication failed: {e}")
+            self._authenticated = False
+            return False
+            
+    def is_authenticated(self) -> bool:
+        """Check if authenticated with YouTube"""
+        return self._authenticated and self.service is not None
+        
+    def format_video_metadata(self, video_date: date, start_time: datetime, 
+                            end_time: datetime) -> Dict[str, Any]:
+        """
+        Format video metadata based on configuration
+        
+        Args:
+            video_date: Date the video was captured
+            start_time: Capture start time
+            end_time: Capture end time
+            
+        Returns:
+            Dictionary with formatted metadata
+        """
+        # Format date for title
+        date_str = video_date.strftime('%m/%d/%y')
+        title = self.title_format.format(date=date_str)
+        
+        # Format description
+        description = self.description_template.format(
+            date=date_str,
+            start_time=start_time.strftime('%I:%M %p'),
+            end_time=end_time.strftime('%I:%M %p')
+        )
+        
+        # Create tags
+        tags = [
+            'sunset',
+            'timelapse',
+            'alabama',
+            'pelham',
+            f'{video_date.strftime("%B").lower()}',
+            f'{video_date.year}',
+            'daily',
+            'automated'
+        ]
+        
+        metadata = {
+            'snippet': {
+                'title': title,
+                'description': description,
+                'tags': tags,
+                'categoryId': str(self.category_id)
+            },
+            'status': {
+                'privacyStatus': self.privacy_status
+            }
+        }
+        
+        return metadata
+        
+    def upload_video(self, video_path: Path, video_date: date,
+                    start_time: datetime, end_time: datetime) -> Optional[str]:
+        """
+        Upload video to YouTube
+        
+        Args:
+            video_path: Path to video file
+            video_date: Date the video was captured
+            start_time: Capture start time
+            end_time: Capture end time
+            
+        Returns:
+            YouTube video ID if successful, None otherwise
+        """
+        if not self.is_authenticated():
+            self.logger.error("Not authenticated with YouTube")
+            return None
+            
+        if not video_path.exists():
+            self.logger.error(f"Video file not found: {video_path}")
+            return None
+            
+        try:
+            # Format metadata
+            metadata = self.format_video_metadata(video_date, start_time, end_time)
+            
+            self.logger.info(f"Uploading video to YouTube: {metadata['snippet']['title']}")
+            self.logger.info(f"File: {video_path} ({video_path.stat().st_size / 1024 / 1024:.1f} MB)")
+            
+            # Create media upload object
+            media = MediaFileUpload(
+                str(video_path),
+                chunksize=-1,  # Upload in a single request
+                resumable=True
+            )
+            
+            # Create upload request
+            request = self.service.videos().insert(
+                part=','.join(metadata.keys()),
+                body=metadata,
+                media_body=media
+            )
+            
+            # Execute upload with progress tracking
+            response = None
+            error = None
+            retry = 0
+            max_retries = self.config.get('advanced.max_retries', 3)
+            
+            while response is None and retry < max_retries:
+                try:
+                    self.logger.info(f"Upload attempt {retry + 1}/{max_retries}")
+                    status, response = request.next_chunk()
+                    
+                    if status:
+                        progress = status.progress() * 100
+                        self.logger.info(f"Upload progress: {progress:.1f}%")
+                        
+                except HttpError as e:
+                    if e.resp.status in [500, 502, 503, 504]:
+                        # Recoverable errors - retry
+                        self.logger.warning(f"Recoverable error {e.resp.status}, retrying...")
+                        retry += 1
+                    else:
+                        # Non-recoverable error
+                        self.logger.error(f"HTTP error {e.resp.status}: {e}")
+                        return None
+                        
+                except Exception as e:
+                    self.logger.error(f"Unexpected error during upload: {e}")
+                    retry += 1
+                    
+            if response is not None:
+                video_id = response['id']
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                
+                self.logger.info(f"Video uploaded successfully!")
+                self.logger.info(f"Video ID: {video_id}")
+                self.logger.info(f"Video URL: {video_url}")
+                
+                return video_id
+            else:
+                self.logger.error("Upload failed after all retry attempts")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to upload video: {e}")
+            return None
+            
+    def get_channel_info(self) -> Optional[Dict[str, Any]]:
+        """
+        Get information about the authenticated YouTube channel
+        
+        Returns:
+            Channel information dictionary or None if failed
+        """
+        if not self.is_authenticated():
+            return None
+            
+        try:
+            response = self.service.channels().list(
+                part='snippet,statistics',
+                mine=True
+            ).execute()
+            
+            if response['items']:
+                return response['items'][0]
+            else:
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to get channel info: {e}")
+            return None
+            
+    def get_video_info(self, video_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get information about a specific video
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Video information dictionary or None if failed
+        """
+        if not self.is_authenticated():
+            return None
+            
+        try:
+            response = self.service.videos().list(
+                part='snippet,statistics,status',
+                id=video_id
+            ).execute()
+            
+            if response['items']:
+                return response['items'][0]
+            else:
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to get video info for {video_id}: {e}")
+            return None
+            
+    def list_recent_videos(self, max_results: int = 10) -> List[Dict[str, Any]]:
+        """
+        List recent videos from the channel
+        
+        Args:
+            max_results: Maximum number of videos to return
+            
+        Returns:
+            List of video information dictionaries
+        """
+        if not self.is_authenticated():
+            return []
+            
+        try:
+            # Get channel ID first
+            channel_info = self.get_channel_info()
+            if not channel_info:
+                return []
+                
+            channel_id = channel_info['id']
+            
+            # Search for videos from this channel
+            search_response = self.service.search().list(
+                part='snippet',
+                channelId=channel_id,
+                type='video',
+                order='date',
+                maxResults=max_results
+            ).execute()
+            
+            return search_response.get('items', [])
+            
+        except Exception as e:
+            self.logger.error(f"Failed to list recent videos: {e}")
+            return []
+            
+    def test_authentication(self) -> bool:
+        """
+        Test YouTube API authentication and permissions
+        
+        Returns:
+            True if all tests pass, False otherwise
+        """
+        self.logger.info("Testing YouTube authentication...")
+        
+        if not self.authenticate():
+            return False
+            
+        try:
+            # Test getting channel info
+            channel_info = self.get_channel_info()
+            if not channel_info:
+                self.logger.error("Failed to get channel information")
+                return False
+                
+            channel_name = channel_info['snippet']['title']
+            subscriber_count = channel_info['statistics'].get('subscriberCount', 'Unknown')
+            
+            self.logger.info(f"Channel: {channel_name}")
+            self.logger.info(f"Subscribers: {subscriber_count}")
+            
+            # Test listing videos
+            recent_videos = self.list_recent_videos(5)
+            self.logger.info(f"Found {len(recent_videos)} recent videos")
+            
+            self.logger.info("YouTube authentication test passed")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"YouTube authentication test failed: {e}")
+            return False

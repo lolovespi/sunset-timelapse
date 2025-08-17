@@ -1,0 +1,39 @@
+# Core dependencies
+PyYAML>=6.0.1
+python-dotenv>=1.0.0
+requests>=2.31.0
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# Astronomy calculations
+astral>=3.2
+# Note: Using zoneinfo from standard library (Python 3.9+) instead of deprecated pytz
+
+# ONVIF camera control
+onvif-zeep>=0.2.12
+zeep>=4.2.1
+
+# Video processing
+ffmpeg-python>=0.2.0
+
+# YouTube API
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+google-api-python-client>=2.100.0
+
+# Scheduling (for Raspberry Pi)
+schedule>=1.2.0
+
+# Logging and utilities
+colorlog>=6.7.0
+tqdm>=4.66.0
+
+# Development/testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.7.0
+flake8>=6.0.0
+
+# Platform-specific (uncomment as needed)
+# RPi.GPIO>=0.7.1  # For Raspberry Pi GPIO access if needed

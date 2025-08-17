@@ -1,0 +1,78 @@
+# Sunset Timelapse Configuration
+# Location settings
+location:
+  city: "Pelham"
+  state: "AL"
+  country: "USA"
+  latitude: 33.2856
+  longitude: -86.8097
+  timezone: "America/Chicago"
+
+# Camera settings
+camera:
+  ip: "192.168.6.44"
+  username: "apiuser"
+  # Password should be set via environment variable CAMERA_PASSWORD
+  onvif_port: 8000
+  rtsp_port: 554
+  model: "RLC810-WA"
+
+# Capture settings
+capture:
+  interval_seconds: 5
+  time_before_sunset_minutes: 60
+  time_after_sunset_minutes: 60
+  image_format: "jpg"
+  image_quality: 90
+
+# Video settings
+video:
+  fps: 12  # 60 images per minute / 5 second interval = 12 fps for real-time
+  output_format: "mp4"
+  codec: "libx264"
+  bitrate: "2M"
+  resolution:
+    width: 1920
+    height: 1080
+
+# Storage settings
+storage:
+  base_path: "/Users/lolovespi/Documents/GitHub/sunset-timelapse/data"  # Updated for Mac
+  images_subdir: "images"
+  videos_subdir: "videos"
+  logs_subdir: "logs"
+  temp_subdir: "temp"
+  keep_images_days: 7  # Delete source images after N days
+  keep_videos_locally_days: 1  # Delete local videos after upload and N days
+
+# YouTube settings
+youtube:
+  # All sensitive data via environment variables
+  # GOOGLE_APPLICATION_CREDENTIALS should point to service account JSON
+  channel_name: "Mont Vaughn Purvis"
+  video_title_format: "Sunset {date}"  # {date} will be replaced with MM/DD/YY
+  description_template: |
+    Daily sunset timelapse from Pelham, Alabama
+    Captured on {date} from {start_time} to {end_time}
+    
+    Camera: Reolink RLC810-WA
+    Interval: 5 seconds
+    
+    #sunset #timelapse #alabama #pelham
+  privacy_status: "public"  # public, private, unlisted
+  category_id: 22  # People & Blogs
+
+# Logging settings
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  max_file_size_mb: 10
+  backup_count: 5
+  console_output: true
+
+# Advanced settings
+advanced:
+  max_retries: 3
+  retry_delay_seconds: 30
+  connection_timeout_seconds: 30
+  ffmpeg_threads: 4
+  cleanup_on_error: true

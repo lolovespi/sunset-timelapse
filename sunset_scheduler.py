@@ -1,0 +1,492 @@
+"""
+Sunset Scheduler
+Main orchestrator for daily sunset timelapse capture and processing
+"""
+
+import logging
+import time
+import signal
+import sys
+from datetime import datetime, date, timedelta
+from pathlib import Path
+from typing import Optional, List
+import schedule
+import threading
+import json
+
+from config_manager import get_config
+from sunset_calculator import SunsetCalculator
+from camera_interface import CameraInterface
+from video_processor import VideoProcessor
+from youtube_uploader import YouTubeUploader
+
+
+class SunsetScheduler:
+    """Main scheduler for sunset timelapse operations"""
+    
+    def __init__(self):
+        """Initialize the scheduler"""
+        self.config = get_config()
+        self.logger = logging.getLogger(__name__)
+        
+        # Initialize components
+        self.sunset_calc = SunsetCalculator()
+        self.camera = CameraInterface()
+        self.video_processor = VideoProcessor()
+        self.youtube_uploader = YouTubeUploader()
+        
+        # State tracking
+        self.running = False
+        self.current_capture_thread = None
+        self.shutdown_requested = False
+        
+        # Setup signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        
+        self.logger.info("Sunset scheduler initialized")
+        
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        self.logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        self.shutdown_requested = True
+        self.stop()
+        
+    def validate_system(self) -> bool:
+        """
+        Validate all system components are working
+        
+        Returns:
+            True if all components are valid, False otherwise
+        """
+        self.logger.info("Validating system components...")
+        
+        validation_results = []
+        
+        # Validate sunset calculator
+        try:
+            if self.sunset_calc.validate_location():
+                self.logger.info("✓ Sunset calculator validation passed")
+                validation_results.append(True)
+            else:
+                self.logger.error("✗ Sunset calculator validation failed")
+                validation_results.append(False)
+        except Exception as e:
+            self.logger.error(f"✗ Sunset calculator error: {e}")
+            validation_results.append(False)
+            
+        # Validate camera
+        try:
+            if self.camera.test_connection():
+                self.logger.info("✓ Camera validation passed")
+                validation_results.append(True)
+            else:
+                self.logger.error("✗ Camera validation failed")
+                validation_results.append(False)
+        except Exception as e:
+            self.logger.error(f"✗ Camera error: {e}")
+            validation_results.append(False)
+            
+        # Validate video processor
+        try:
+            if self.video_processor.validate_ffmpeg():
+                self.logger.info("✓ Video processor validation passed")
+                validation_results.append(True)
+            else:
+                self.logger.error("✗ Video processor validation failed")
+                validation_results.append(False)
+        except Exception as e:
+            self.logger.error(f"✗ Video processor error: {e}")
+            validation_results.append(False)
+            
+        # Validate YouTube uploader (optional)
+        try:
+            if self.youtube_uploader.test_authentication():
+                self.logger.info("✓ YouTube uploader validation passed")
+                validation_results.append(True)
+            else:
+                self.logger.warning("⚠ YouTube uploader validation failed (uploads will be skipped)")
+                validation_results.append(True)  # Non-critical failure
+        except Exception as e:
+            self.logger.warning(f"⚠ YouTube uploader error: {e} (uploads will be skipped)")
+            validation_results.append(True)  # Non-critical failure
+            
+        success = all(validation_results)
+        
+        if success:
+            self.logger.info("✓ System validation completed successfully")
+        else:
+            self.logger.error("✗ System validation failed")
+            
+        return success
+        
+    def capture_sunset_sequence(self, target_date: Optional[date] = None) -> Optional[List[Path]]:
+        """
+        Capture a complete sunset sequence for the specified date
+        
+        Args:
+            target_date: Date to capture (default: today)
+            
+        Returns:
+            List of captured image paths or None if failed
+        """
+        if target_date is None:
+            target_date = date.today()
+            
+        self.logger.info(f"Starting sunset capture sequence for {target_date}")
+        
+        try:
+            # Calculate capture window
+            start_time, end_time = self.sunset_calc.get_capture_window(target_date)
+            interval = self.config.get('capture.interval_seconds', 5)
+            
+            # Convert timezone-aware to naive datetimes for camera interface
+            if hasattr(start_time, 'tzinfo') and start_time.tzinfo is not None:
+                start_time = start_time.replace(tzinfo=None)
+            if hasattr(end_time, 'tzinfo') and end_time.tzinfo is not None:
+                end_time = end_time.replace(tzinfo=None)
+            
+            self.logger.info(f"Capture window: {start_time} to {end_time}")
+            
+            # Capture sequence using RTSP video recording method (no ONVIF connection needed)
+            captured_images = self.camera.capture_video_sequence(start_time, end_time, interval)
+            
+            if captured_images:
+                self.logger.info(f"Capture sequence completed: {len(captured_images)} images")
+                return captured_images
+            else:
+                self.logger.error("No images captured")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to capture sunset sequence: {e}")
+            self.camera.disconnect()
+            return None
+            
+    def process_captured_images(self, target_date: date) -> Optional[Path]:
+        """
+        Process captured images into a timelapse video
+        
+        Args:
+            target_date: Date of the images to process
+            
+        Returns:
+            Path to created video or None if failed
+        """
+        self.logger.info(f"Processing images for {target_date}")
+        
+        try:
+            video_path = self.video_processor.create_date_timelapse(target_date)
+            
+            if video_path and video_path.exists():
+                self.logger.info(f"Timelapse created: {video_path}")
+                return video_path
+            else:
+                self.logger.error("Failed to create timelapse")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to process images: {e}")
+            return None
+            
+    def upload_to_youtube(self, video_path: Path, target_date: date) -> bool:
+        """
+        Upload video to YouTube
+        
+        Args:
+            video_path: Path to video file
+            target_date: Date the video was captured
+            
+        Returns:
+            True if upload successful, False otherwise
+        """
+        try:
+            # Get capture times for metadata
+            start_time, end_time = self.sunset_calc.get_capture_window(target_date)
+            
+            # Upload video
+            video_id = self.youtube_uploader.upload_video(
+                video_path, target_date, start_time, end_time
+            )
+            
+            if video_id:
+                self.logger.info(f"Video uploaded to YouTube: {video_id}")
+                return True
+            else:
+                self.logger.error("Failed to upload video to YouTube")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to upload video: {e}")
+            return False
+            
+    def cleanup_old_files(self):
+        """Clean up old files based on configuration"""
+        self.logger.info("Starting cleanup of old files...")
+        
+        try:
+            paths = self.config.get_storage_paths()
+            current_date = date.today()
+            
+            # Clean up old images
+            image_retention_days = self.config.get('storage.keep_images_days', 7)
+            if image_retention_days > 0:
+                cutoff_date = current_date - timedelta(days=image_retention_days)
+                
+                for date_dir in paths['images'].iterdir():
+                    if date_dir.is_dir():
+                        try:
+                            dir_date = datetime.strptime(date_dir.name, '%Y-%m-%d').date()
+                            if dir_date < cutoff_date:
+                                self.logger.info(f"Removing old image directory: {date_dir}")
+                                import shutil
+                                shutil.rmtree(date_dir)
+                        except ValueError:
+                            # Skip directories that don't match date format
+                            continue
+                            
+            # Clean up old videos
+            video_retention_days = self.config.get('storage.keep_videos_locally_days', 1)
+            if video_retention_days > 0:
+                cutoff_date = current_date - timedelta(days=video_retention_days)
+                cutoff_timestamp = cutoff_date.strftime('%m_%d_%y')
+                
+                for video_file in paths['videos'].glob('*.mp4'):
+                    try:
+                        # Extract date from filename (format: Sunset_MM_DD_YY.mp4)
+                        if video_file.stem.startswith('Sunset_'):
+                            date_part = video_file.stem.replace('Sunset_', '')
+                            if date_part < cutoff_timestamp:
+                                self.logger.info(f"Removing old video: {video_file}")
+                                video_file.unlink()
+                    except Exception as e:
+                        self.logger.warning(f"Error checking video date for {video_file}: {e}")
+                        
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
+            
+    def complete_daily_workflow(self, target_date: Optional[date] = None) -> bool:
+        """
+        Execute complete daily workflow: capture -> process -> upload -> cleanup
+        
+        Args:
+            target_date: Date to process (default: today)
+            
+        Returns:
+            True if workflow completed successfully, False otherwise
+        """
+        if target_date is None:
+            target_date = date.today()
+            
+        self.logger.info(f"Starting complete daily workflow for {target_date}")
+        
+        try:
+            # Step 1: Capture images
+            captured_images = self.capture_sunset_sequence(target_date)
+            if not captured_images:
+                self.logger.error("Image capture failed, aborting workflow")
+                return False
+                
+            # Step 2: Process into video
+            video_path = self.process_captured_images(target_date)
+            if not video_path:
+                self.logger.error("Video processing failed, aborting workflow")
+                return False
+                
+            # Step 3: Upload to YouTube
+            upload_success = self.upload_to_youtube(video_path, target_date)
+            if not upload_success:
+                self.logger.warning("YouTube upload failed, but workflow will continue")
+                
+            # Step 4: Cleanup old files
+            self.cleanup_old_files()
+            
+            self.logger.info(f"Daily workflow completed for {target_date}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Daily workflow failed: {e}")
+            return False
+            
+    def schedule_daily_capture(self):
+        """Schedule daily capture based on sunset times"""
+        self.logger.info("Setting up daily capture schedule...")
+        
+        # Clear existing schedules
+        schedule.clear()
+        
+        # Calculate next capture time
+        start_time, _ = self.sunset_calc.get_next_capture_window()
+        
+        # Schedule capture to start 5 minutes before the calculated start time
+        # This ensures the system is ready
+        schedule_time = start_time - timedelta(minutes=5)
+        schedule_time_str = schedule_time.strftime('%H:%M')
+        
+        self.logger.info(f"Scheduling daily capture at {schedule_time_str}")
+        
+        # Schedule the job
+        schedule.every().day.at(schedule_time_str).do(self.complete_daily_workflow)
+        
+        # Also schedule a weekly cleanup
+        schedule.every().sunday.at("02:00").do(self.cleanup_old_files)
+        
+    def run_scheduler(self):
+        """Run the main scheduler loop"""
+        self.logger.info("Starting sunset scheduler...")
+        self.running = True
+        
+        # Set up initial schedule
+        self.schedule_daily_capture()
+        
+        # Display next scheduled jobs
+        jobs = schedule.get_jobs()
+        if jobs:
+            next_job = min(jobs, key=lambda x: x.next_run)
+            self.logger.info(f"Next scheduled job: {next_job.next_run}")
+            
+        # Main scheduler loop
+        while self.running and not self.shutdown_requested:
+            try:
+                # Run scheduled jobs
+                schedule.run_pending()
+                
+                # Check if we need to reschedule (daily at midnight)
+                now = datetime.now()
+                if now.hour == 0 and now.minute == 0:
+                    self.schedule_daily_capture()
+                    
+                # Sleep for a minute before checking again
+                time.sleep(60)
+                
+            except KeyboardInterrupt:
+                self.logger.info("Keyboard interrupt received")
+                break
+            except Exception as e:
+                self.logger.error(f"Scheduler error: {e}")
+                time.sleep(60)  # Wait a minute before retrying
+                
+        self.logger.info("Scheduler stopped")
+        
+    def stop(self):
+        """Stop the scheduler"""
+        self.logger.info("Stopping scheduler...")
+        self.running = False
+        
+        # Wait for current capture to complete if running
+        if self.current_capture_thread and self.current_capture_thread.is_alive():
+            self.logger.info("Waiting for current capture to complete...")
+            self.current_capture_thread.join(timeout=30)
+            
+    def run_immediate_capture(self):
+        """Run immediate capture for testing purposes"""
+        self.logger.info("Running immediate capture for testing...")
+        
+        if not self.validate_system():
+            self.logger.error("System validation failed, aborting immediate capture")
+            return False
+            
+        # Run immediate capture with a short window (15 minutes total)
+        from datetime import datetime, timedelta
+        start_time = datetime.now()
+        end_time = start_time + timedelta(minutes=5)  # 5-minute test capture
+        
+        self.logger.info(f"Starting immediate test capture from {start_time.strftime('%H:%M:%S')} to {end_time.strftime('%H:%M:%S')}")
+        
+        # Manual workflow for immediate testing
+        target_date = start_time.date()
+        
+        # Capture images
+        captured_images = self.capture_sunset_sequence_manual(start_time, end_time)
+        if not captured_images:
+            self.logger.error("Image capture failed, aborting workflow")
+            return False
+            
+        # Process images into video
+        video_path = self.process_captured_images(target_date)
+        if not video_path:
+            self.logger.error("Video processing failed")
+            return False
+            
+        # Upload to YouTube
+        upload_success = self.upload_to_youtube(video_path, target_date)
+        if not upload_success:
+            self.logger.warning("YouTube upload failed, but workflow completed")
+            
+        self.logger.info("Immediate capture workflow completed successfully")
+        return True
+        
+    def capture_sunset_sequence_manual(self, start_time, end_time):
+        """Manual capture sequence with specified start/end times"""
+        try:
+            interval = self.config.get('capture.interval_seconds', 5)
+            
+            self.logger.info(f"Manual capture window: {start_time} to {end_time}")
+            
+            # Capture sequence using RTSP video recording method (no ONVIF connection needed)
+            captured_images = self.camera.capture_video_sequence(start_time, end_time, interval)
+            
+            if captured_images:
+                self.logger.info(f"Manual capture sequence completed: {len(captured_images)} images")
+                return captured_images
+            else:
+                self.logger.error("No images captured")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed manual capture sequence: {e}")
+            self.camera.disconnect()
+            return None
+        
+    def get_status(self) -> dict:
+        """
+        Get current system status
+        
+        Returns:
+            Dictionary with system status information
+        """
+        now = datetime.now()
+        
+        status = {
+            'timestamp': now.isoformat(),
+            'running': self.running,
+            'next_sunset': None,
+            'next_capture_window': None,
+            'system_health': {},
+            'recent_activity': {}
+        }
+        
+        try:
+            # Get next sunset info
+            start_time, end_time = self.sunset_calc.get_next_capture_window()
+            sunset_time = self.sunset_calc.get_sunset_time(start_time.date())
+            
+            status['next_sunset'] = sunset_time.isoformat()
+            status['next_capture_window'] = {
+                'start': start_time.isoformat(),
+                'end': end_time.isoformat()
+            }
+            
+            # System health checks
+            status['system_health'] = {
+                'camera_connected': self.camera.is_connected(),
+                'youtube_authenticated': self.youtube_uploader.is_authenticated(),
+                'ffmpeg_available': self.video_processor.validate_ffmpeg(),
+                'storage_accessible': True  # TODO: Add storage health check
+            }
+            
+            # Recent activity (check for recent files)
+            paths = self.config.get_storage_paths()
+            recent_images = list(paths['images'].glob('**/*.jpg'))[-5:]  # Last 5 images
+            recent_videos = list(paths['videos'].glob('*.mp4'))[-3:]  # Last 3 videos
+            
+            status['recent_activity'] = {
+                'recent_images': [str(p) for p in recent_images],
+                'recent_videos': [str(p) for p in recent_videos]
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting status: {e}")
+            status['error'] = str(e)
+            
+        return status

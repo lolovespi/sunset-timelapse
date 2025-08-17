@@ -1,0 +1,34 @@
+# Environment and secrets
+.env
+*.json
+!requirements.json
+config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+
+# Data and outputs
+data/
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
