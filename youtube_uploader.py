@@ -122,7 +122,7 @@ class YouTubeUploader:
         return self._authenticated and self.service is not None
         
     def format_video_metadata(self, video_date: date, start_time: datetime, 
-                            end_time: datetime) -> Dict[str, Any]:
+                            end_time: datetime, is_test: bool = False) -> Dict[str, Any]:
         """
         Format video metadata based on configuration
         
@@ -130,32 +130,62 @@ class YouTubeUploader:
             video_date: Date the video was captured
             start_time: Capture start time
             end_time: Capture end time
+            is_test: If True, use test title format
             
         Returns:
             Dictionary with formatted metadata
         """
         # Format date for title
         date_str = video_date.strftime('%m/%d/%y')
-        title = self.title_format.format(date=date_str)
+        
+        if is_test:
+            title = f"Test Capture - {datetime.now().strftime('%H:%M')} - {date_str}"
+        else:
+            title = self.title_format.format(date=date_str)
         
         # Format description
-        description = self.description_template.format(
-            date=date_str,
-            start_time=start_time.strftime('%I:%M %p'),
-            end_time=end_time.strftime('%I:%M %p')
-        )
+        if is_test:
+            description = f"""
+System test capture from Pelham, Alabama
+Captured on {date_str} from {start_time.strftime('%I:%M %p')} to {end_time.strftime('%I:%M %p')}
+
+This is an automated system test to verify camera and upload functionality.
+
+Camera: Reolink RLC810-WA
+Interval: 5 seconds
+
+#test #timelapse #alabama #pelham #systemtest
+            """.strip()
+        else:
+            description = self.description_template.format(
+                date=date_str,
+                start_time=start_time.strftime('%I:%M %p'),
+                end_time=end_time.strftime('%I:%M %p')
+            )
         
         # Create tags
-        tags = [
-            'sunset',
-            'timelapse',
-            'alabama',
-            'pelham',
-            f'{video_date.strftime("%B").lower()}',
-            f'{video_date.year}',
-            'daily',
-            'automated'
-        ]
+        if is_test:
+            tags = [
+                'test',
+                'timelapse',
+                'alabama', 
+                'pelham',
+                'systemtest',
+                'automated',
+                f'{video_date.strftime("%B").lower()}',
+                f'{video_date.year}'
+            ]
+        else:
+            tags = [
+                'sunset',
+                'timelapse',
+                'alabama',
+                'pelham',
+                f'{video_date.strftime("%B").lower()}',
+                f'{video_date.year}',
+                'daily',
+                'automated'
+            ]
         
         metadata = {
             'snippet': {
@@ -172,7 +202,7 @@ class YouTubeUploader:
         return metadata
         
     def upload_video(self, video_path: Path, video_date: date,
-                    start_time: datetime, end_time: datetime) -> Optional[str]:
+                    start_time: datetime, end_time: datetime, is_test: bool = False) -> Optional[str]:
         """
         Upload video to YouTube
         
@@ -181,6 +211,7 @@ class YouTubeUploader:
             video_date: Date the video was captured
             start_time: Capture start time
             end_time: Capture end time
+            is_test: If True, use test title format
             
         Returns:
             YouTube video ID if successful, None otherwise
@@ -195,7 +226,7 @@ class YouTubeUploader:
             
         try:
             # Format metadata
-            metadata = self.format_video_metadata(video_date, start_time, end_time)
+            metadata = self.format_video_metadata(video_date, start_time, end_time, is_test)
             
             self.logger.info(f"Uploading video to YouTube: {metadata['snippet']['title']}")
             self.logger.info(f"File: {video_path} ({video_path.stat().st_size / 1024 / 1024:.1f} MB)")
