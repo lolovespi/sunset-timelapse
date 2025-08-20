@@ -213,10 +213,15 @@ class CameraInterface:
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
                 temp_video_path = Path(temp_video.name)
             
-            # Record RTSP stream using ffmpeg
+            # Record RTSP stream using ffmpeg with robust connection settings
             cmd = [
                 'ffmpeg', '-y',
                 '-rtsp_transport', 'tcp',
+                '-rtsp_flags', 'prefer_tcp',
+                '-fflags', 'nobuffer',
+                '-flags', 'low_delay',
+                '-probesize', '32',
+                '-analyzeduration', '0',
                 '-i', rtsp_url,
                 '-t', str(int(duration)),
                 '-c', 'copy',
@@ -228,7 +233,14 @@ class CameraInterface:
             cmd_safe = cmd.copy()
             cmd_safe[cmd_safe.index(rtsp_url)] = self._sanitize_rtsp_url_for_logging(rtsp_url)
             self.logger.info(f"Starting RTSP recording: {' '.join(cmd_safe)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 30)
+            
+            # Set generous timeout - for long recordings, allow extra time for network issues
+            # Minimum 5 minutes buffer, or 10% extra time, whichever is larger
+            buffer_time = max(300, duration * 0.1)  # At least 5min buffer
+            timeout_seconds = duration + buffer_time
+            self.logger.info(f"Setting timeout to {timeout_seconds:.0f} seconds ({buffer_time:.0f}s buffer)")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
             
             if result.returncode != 0:
                 self.logger.error(f"FFmpeg recording failed: {result.stderr}")
@@ -246,8 +258,18 @@ class CameraInterface:
             
             return captured_images
             
+        except subprocess.TimeoutExpired as e:
+            self.logger.error(f"FFmpeg recording timed out after {timeout_seconds:.0f} seconds")
+            self.logger.error("This may indicate network connectivity issues or camera problems")
+            # Clean up temp file if it exists
+            if 'temp_video_path' in locals() and temp_video_path.exists():
+                temp_video_path.unlink()
+            return captured_images
         except Exception as e:
             self.logger.error(f"Failed to capture video sequence: {e}")
+            # Clean up temp file if it exists
+            if 'temp_video_path' in locals() and temp_video_path.exists():
+                temp_video_path.unlink()
             return captured_images
     
     def extract_frames_from_video(self, video_path: Path, start_time: datetime, 

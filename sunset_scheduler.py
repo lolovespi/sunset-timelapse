@@ -19,6 +19,7 @@ from sunset_calculator import SunsetCalculator
 from camera_interface import CameraInterface
 from video_processor import VideoProcessor
 from youtube_uploader import YouTubeUploader
+from email_notifier import EmailNotifier
 
 
 class SunsetScheduler:
@@ -34,6 +35,7 @@ class SunsetScheduler:
         self.camera = CameraInterface()
         self.video_processor = VideoProcessor()
         self.youtube_uploader = YouTubeUploader()
+        self.email_notifier = EmailNotifier()
         
         # State tracking
         self.running = False
@@ -156,11 +158,21 @@ class SunsetScheduler:
                 return captured_images
             else:
                 self.logger.error("No images captured")
+                # Send email notification for capture failure
+                self.email_notifier.send_capture_failure(
+                    "Camera failed to capture any images during the sunset window", 
+                    datetime.combine(target_date, datetime.min.time())
+                )
                 return None
                 
         except Exception as e:
             self.logger.error(f"Failed to capture sunset sequence: {e}")
             self.camera.disconnect()
+            # Send email notification for capture exception
+            self.email_notifier.send_capture_failure(
+                f"Exception during sunset capture: {str(e)}", 
+                datetime.combine(target_date, datetime.min.time())
+            )
             return None
             
     def process_captured_images(self, target_date: date) -> Optional[Path]:
@@ -183,10 +195,22 @@ class SunsetScheduler:
                 return video_path
             else:
                 self.logger.error("Failed to create timelapse")
+                # Send email notification for video processing failure
+                self.email_notifier.send_processing_failure(
+                    "Failed to create timelapse video from captured images", 
+                    target_date, 
+                    "video_creation"
+                )
                 return None
                 
         except Exception as e:
             self.logger.error(f"Failed to process images: {e}")
+            # Send email notification for video processing exception
+            self.email_notifier.send_processing_failure(
+                f"Exception during video processing: {str(e)}", 
+                target_date, 
+                "video_creation"
+            )
             return None
             
     def upload_to_youtube(self, video_path: Path, target_date: date, 
@@ -291,18 +315,26 @@ class SunsetScheduler:
             captured_images = self.capture_sunset_sequence(target_date)
             if not captured_images:
                 self.logger.error("Image capture failed, aborting workflow")
+                # Email notification already sent in capture_sunset_sequence
                 return False
                 
             # Step 2: Process into video
             video_path = self.process_captured_images(target_date)
             if not video_path:
                 self.logger.error("Video processing failed, aborting workflow")
+                # Email notification already sent in process_captured_images
                 return False
                 
             # Step 3: Upload to YouTube
             upload_success = self.upload_to_youtube(video_path, target_date)
             if not upload_success:
                 self.logger.warning("YouTube upload failed, but workflow will continue")
+                # Send email notification for YouTube upload failure
+                self.email_notifier.send_processing_failure(
+                    "YouTube upload failed", 
+                    target_date, 
+                    "youtube_upload"
+                )
                 
             # Step 4: Cleanup old files
             self.cleanup_old_files()

@@ -141,6 +141,20 @@ def cmd_test(args):
         else:
             logger.error("✗ Sunset calculation test failed")
             sys.exit(1)
+    
+    if args.email:
+        logger.info("Testing email notifications...")
+        from email_notifier import EmailNotifier
+        email_notifier = EmailNotifier()
+        
+        if email_notifier.is_enabled():
+            if email_notifier.test_connection():
+                logger.info("✓ Email notification test passed")
+            else:
+                logger.error("✗ Email notification test failed")
+                sys.exit(1)
+        else:
+            logger.info("✓ Email notifications disabled (test skipped)")
             
     logger.info("All tests passed!")
 
@@ -234,7 +248,7 @@ Examples:
   python main.py historical --start 2024-01-01 --end 2024-01-31 --list
   
   # Run system tests
-  python main.py test --camera --youtube
+  python main.py test --camera --youtube --email
   
   # Show system status
   python main.py status
@@ -271,6 +285,8 @@ Examples:
                            help='Test YouTube authentication')
     test_parser.add_argument('--sunset', action='store_true',
                            help='Test sunset calculations')
+    test_parser.add_argument('--email', action='store_true',
+                           help='Test email notifications')
     test_parser.set_defaults(func=cmd_test)
     
     # Status command

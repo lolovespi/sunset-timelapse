@@ -23,6 +23,7 @@ except ImportError:
     GOOGLE_AVAILABLE = False
 
 from config_manager import get_config
+from email_notifier import EmailNotifier
 
 
 class YouTubeUploader:
@@ -37,6 +38,7 @@ class YouTubeUploader:
         self.logger = logging.getLogger(__name__)
         self.service = None
         self._authenticated = False
+        self.email_notifier = EmailNotifier()
         
         if not GOOGLE_AVAILABLE:
             self.logger.error("Google API libraries not available. Install google-api-python-client")
@@ -248,6 +250,21 @@ class YouTubeUploader:
                 self.logger.info(f"Video uploaded successfully!")
                 self.logger.info(f"Video ID: {video_id}")
                 self.logger.info(f"Video URL: {video_url}")
+                
+                # Send success email notification
+                stats = {
+                    "Video ID": video_id,
+                    "File Size": f"{video_path.stat().st_size / 1024 / 1024:.1f} MB",
+                    "Privacy Status": metadata['status']['privacyStatus'],
+                    "Upload Time": datetime.now().strftime('%I:%M %p')
+                }
+                
+                self.email_notifier.send_upload_success(
+                    metadata['snippet']['title'],
+                    video_url,
+                    datetime.combine(video_date, datetime.min.time()),
+                    stats
+                )
                 
                 return video_id
             else:

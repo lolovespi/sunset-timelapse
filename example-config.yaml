@@ -63,6 +63,22 @@ youtube:
   privacy_status: "public"  # public, private, unlisted
   category_id: 22  # People & Blogs
 
+# Email notification settings
+email:
+  enabled: false  # Set to true to enable email notifications
+  smtp_server: "smtp.gmail.com"  # Gmail SMTP server (or your provider)
+  smtp_port: 587  # Standard TLS port
+  use_tls: true  # Use TLS encryption
+  from_email: "your-email@gmail.com"  # Sender email address
+  to_emails:  # List of recipient email addresses
+    - "recipient1@example.com"
+    - "recipient2@example.com"
+  # Set these via environment variables for security:
+  # EMAIL_USERNAME - your email username
+  # EMAIL_PASSWORD - your email password or app-specific password
+  username: "${EMAIL_USERNAME}"  # Will be read from environment
+  password: "${EMAIL_PASSWORD}"  # Will be read from environment
+
 # Logging settings
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR
