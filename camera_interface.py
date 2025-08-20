@@ -218,13 +218,14 @@ class CameraInterface:
                 'ffmpeg', '-y',
                 '-rtsp_transport', 'tcp',
                 '-rtsp_flags', 'prefer_tcp',
-                '-fflags', 'nobuffer',
-                '-flags', 'low_delay',
-                '-probesize', '32',
-                '-analyzeduration', '0',
+                '-probesize', '5000000',  # 5MB probe size
+                '-analyzeduration', '5000000',  # 5 seconds analysis
                 '-i', rtsp_url,
                 '-t', str(int(duration)),
-                '-c', 'copy',
+                '-c:v', 'libx264',  # Re-encode video to ensure compatibility
+                '-c:a', 'aac',      # Re-encode audio
+                '-preset', 'ultrafast',  # Fast encoding
+                '-crf', '23',       # Good quality
                 '-avoid_negative_ts', 'make_zero',
                 str(temp_video_path)
             ]
