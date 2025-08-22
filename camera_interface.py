@@ -213,19 +213,13 @@ class CameraInterface:
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
                 temp_video_path = Path(temp_video.name)
             
-            # Record RTSP stream using ffmpeg with robust connection settings
+            # Record RTSP stream using ffmpeg with stream copy for better performance
             cmd = [
                 'ffmpeg', '-y',
                 '-rtsp_transport', 'tcp',
-                '-rtsp_flags', 'prefer_tcp',
-                '-probesize', '5000000',  # 5MB probe size
-                '-analyzeduration', '5000000',  # 5 seconds analysis
                 '-i', rtsp_url,
                 '-t', str(int(duration)),
-                '-c:v', 'libx264',  # Re-encode video to ensure compatibility
-                '-c:a', 'aac',      # Re-encode audio
-                '-preset', 'ultrafast',  # Fast encoding
-                '-crf', '23',       # Good quality
+                '-c', 'copy',  # Stream copy - much faster than re-encoding
                 '-avoid_negative_ts', 'make_zero',
                 str(temp_video_path)
             ]
@@ -235,9 +229,9 @@ class CameraInterface:
             cmd_safe[cmd_safe.index(rtsp_url)] = self._sanitize_rtsp_url_for_logging(rtsp_url)
             self.logger.info(f"Starting RTSP recording: {' '.join(cmd_safe)}")
             
-            # Set generous timeout - for long recordings, allow extra time for network issues
-            # Minimum 5 minutes buffer, or 10% extra time, whichever is larger
-            buffer_time = max(300, duration * 0.1)  # At least 5min buffer
+            # Set timeout with reasonable buffer for stream copy operations
+            # Stream copy is much faster than re-encoding, so smaller buffer needed
+            buffer_time = max(60, duration * 0.05)  # At least 1min buffer, 5% extra
             timeout_seconds = duration + buffer_time
             self.logger.info(f"Setting timeout to {timeout_seconds:.0f} seconds ({buffer_time:.0f}s buffer)")
             
@@ -262,6 +256,7 @@ class CameraInterface:
         except subprocess.TimeoutExpired as e:
             self.logger.error(f"FFmpeg recording timed out after {timeout_seconds:.0f} seconds")
             self.logger.error("This may indicate network connectivity issues or camera problems")
+            self.logger.error("Consider checking camera connection or reducing capture duration")
             # Clean up temp file if it exists
             if 'temp_video_path' in locals() and temp_video_path.exists():
                 temp_video_path.unlink()

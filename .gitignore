@@ -1,8 +1,11 @@
 # Environment and secrets
 .env
+.env.pi
+.env.mac
 *.json
 !requirements.json
 config.yaml
+config-pi.yaml
 
 # Python
 __pycache__/
@@ -32,3 +35,6 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Deployment scripts
+deploy.sh
