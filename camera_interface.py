@@ -221,6 +221,8 @@ class CameraInterface:
                 '-t', str(int(duration)),
                 '-c', 'copy',  # Stream copy - much faster than re-encoding
                 '-avoid_negative_ts', 'make_zero',
+                '-fflags', '+genpts',  # Generate presentation timestamps
+                '-use_wallclock_as_timestamps', '1',  # Use system time for timestamps
                 str(temp_video_path)
             ]
             

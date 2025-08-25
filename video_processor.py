@@ -222,9 +222,29 @@ class VideoProcessor:
                     **{'preset': 'medium', 'crf': '23'}  # Quality settings
                 )
                 
-                # Run ffmpeg
+                # Run ffmpeg with timeout to prevent hanging
                 self.logger.info("Starting video encoding...")
-                ffmpeg.run(output_stream, overwrite_output=True, quiet=False)
+                # Calculate reasonable timeout: base time + per-frame processing time
+                base_timeout = 300  # 5 minutes base
+                frame_timeout = analysis['valid_images'] * 2  # 2 seconds per frame
+                total_timeout = base_timeout + frame_timeout
+                
+                try:
+                    import subprocess
+                    # Convert ffmpeg-python to subprocess call with timeout
+                    args = ffmpeg.compile(output_stream, overwrite_output=True)
+                    result = subprocess.run(args, capture_output=True, text=True, timeout=total_timeout)
+                    
+                    if result.returncode != 0:
+                        self.logger.error(f"FFmpeg failed with return code {result.returncode}")
+                        if result.stderr:
+                            self.logger.error(f"FFmpeg stderr: {result.stderr}")
+                        return False
+                        
+                except subprocess.TimeoutExpired:
+                    self.logger.error(f"FFmpeg timed out after {total_timeout} seconds")
+                    self.logger.error("This usually indicates corrupted input files or insufficient system resources")
+                    return False
                 
                 # Verify output file was created
                 if output_path.exists() and output_path.stat().st_size > 0:

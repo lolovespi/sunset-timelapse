@@ -159,6 +159,73 @@ def cmd_test(args):
     logger.info("All tests passed!")
 
 
+def cmd_capture(args):
+    """Run on-demand test capture"""
+    setup_logging()
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"Starting on-demand capture for {args.duration} seconds...")
+    
+    scheduler = SunsetScheduler()
+    
+    if args.validate:
+        logger.info("Running system validation...")
+        if not scheduler.validate_system():
+            logger.error("System validation failed")
+            sys.exit(1)
+        logger.info("System validation passed")
+    
+    # Calculate start and end times for custom duration
+    start_time = datetime.now()
+    end_time = start_time + timedelta(seconds=args.duration)
+    interval = args.interval or 5
+    
+    logger.info(f"Capture window: {start_time.strftime('%H:%M:%S')} to {end_time.strftime('%H:%M:%S')}")
+    logger.info(f"Duration: {args.duration} seconds ({args.duration/3600:.1f} hours)")
+    logger.info(f"Interval: {interval} seconds")
+    
+    try:
+        # Use camera interface directly for custom timing
+        captured_images = scheduler.camera.capture_video_sequence(
+            start_time, end_time, interval
+        )
+        
+        if captured_images:
+            logger.info(f"Capture completed: {len(captured_images)} images")
+            
+            if args.process:
+                logger.info("Processing images into video...")
+                # Create video path in the videos directory
+                config = get_config()
+                paths = config.get_storage_paths()
+                video_filename = f"test_capture_{start_time.strftime('%Y%m%d_%H%M%S')}.mp4"
+                video_path = paths['videos'] / video_filename
+                
+                success = scheduler.video_processor.create_timelapse(
+                    captured_images, 
+                    video_path
+                )
+                
+                if success:
+                    logger.info(f"Video created: {video_path}")
+                    if args.upload:
+                        logger.info("Uploading to YouTube...")
+                        success = scheduler.upload_to_youtube(
+                            video_path, date.today(), start_time, end_time, is_test=True
+                        )
+                        logger.info("Upload successful" if success else "Upload failed")
+                else:
+                    logger.error("Failed to create video")
+                    sys.exit(1)
+        else:
+            logger.error("No images captured")
+            sys.exit(1)
+            
+    except Exception as e:
+        logger.error(f"Capture failed: {e}")
+        sys.exit(1)
+
+
 def cmd_status(args):
     """Show system status"""
     setup_logging()
@@ -288,6 +355,20 @@ Examples:
     test_parser.add_argument('--email', action='store_true',
                            help='Test email notifications')
     test_parser.set_defaults(func=cmd_test)
+    
+    # Capture command (on-demand test capture)
+    capture_parser = subparsers.add_parser('capture', help='Run on-demand test capture')
+    capture_parser.add_argument('--duration', type=int, required=True,
+                               help='Capture duration in seconds (e.g., 7200 for 2 hours)')
+    capture_parser.add_argument('--interval', type=int, default=5,
+                               help='Interval between captures in seconds (default: 5)')
+    capture_parser.add_argument('--validate', action='store_true',
+                               help='Validate system before starting')
+    capture_parser.add_argument('--process', action='store_true',
+                               help='Process images into video after capture')
+    capture_parser.add_argument('--upload', action='store_true',
+                               help='Upload video to YouTube (requires --process)')
+    capture_parser.set_defaults(func=cmd_capture)
     
     # Status command
     status_parser = subparsers.add_parser('status', help='Show system status')
