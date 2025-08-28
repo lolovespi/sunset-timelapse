@@ -1,11 +1,14 @@
 # Environment and secrets
 .env
-.env.pi
-.env.mac
+.env.*
 *.json
 !requirements.json
+!example-config.yaml
 config.yaml
 config-pi.yaml
+*token*
+*credentials*
+*secret*
 
 # Python
 __pycache__/
