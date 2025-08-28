@@ -417,18 +417,22 @@ class SunsetScheduler:
             self.logger.info("Waiting for current capture to complete...")
             self.current_capture_thread.join(timeout=30)
             
-    def run_immediate_capture(self):
-        """Run immediate capture for testing purposes"""
-        self.logger.info("Running immediate capture for testing...")
+    def run_immediate_capture(self, duration_minutes=5):
+        """Run immediate capture for testing purposes
+        
+        Args:
+            duration_minutes: Duration of capture in minutes (default: 5)
+        """
+        self.logger.info(f"Running immediate capture for {duration_minutes} minutes...")
         
         if not self.validate_system():
             self.logger.error("System validation failed, aborting immediate capture")
             return False
             
-        # Run immediate capture with a short window (15 minutes total)
+        # Run immediate capture with specified duration
         from datetime import datetime, timedelta
         start_time = datetime.now()
-        end_time = start_time + timedelta(minutes=5)  # 5-minute test capture
+        end_time = start_time + timedelta(minutes=duration_minutes)
         
         self.logger.info(f"Starting immediate test capture from {start_time.strftime('%H:%M:%S')} to {end_time.strftime('%H:%M:%S')}")
         

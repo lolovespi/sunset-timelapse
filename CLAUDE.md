@@ -32,8 +32,11 @@ python main.py config --validate --show
 # Run scheduler with validation (primary command for Raspberry Pi)
 python main.py schedule --validate
 
-# Immediate capture for testing
+# Immediate capture for testing (default: 5 minutes)
 python main.py schedule --immediate
+
+# Immediate capture with custom duration (e.g., 30 minutes)
+python main.py schedule --immediate --duration 30
 
 # Check system status
 python main.py status

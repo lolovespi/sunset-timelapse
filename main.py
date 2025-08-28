@@ -39,8 +39,8 @@ def cmd_schedule(args):
         logger.info("System validation passed")
         
     if args.immediate:
-        logger.info("Running immediate capture...")
-        success = scheduler.run_immediate_capture()
+        logger.info(f"Running immediate capture for {args.duration} minutes...")
+        success = scheduler.run_immediate_capture(duration_minutes=args.duration)
         sys.exit(0 if success else 1)
         
     try:
@@ -305,8 +305,11 @@ Examples:
   # Run daily scheduler (Raspberry Pi)
   python main.py schedule --validate
   
-  # Run immediate capture for testing
+  # Run immediate capture for testing (5 minutes)
   python main.py schedule --immediate
+  
+  # Run immediate capture for 30 minutes
+  python main.py schedule --immediate --duration 30
   
   # Process historical footage (MacBook)
   python main.py historical --start 2024-01-01 --end 2024-01-07 --upload
@@ -330,6 +333,8 @@ Examples:
                                help='Validate system before starting')
     schedule_parser.add_argument('--immediate', action='store_true',
                                help='Run immediate capture instead of scheduling')
+    schedule_parser.add_argument('--duration', type=int, default=5,
+                               help='Duration in minutes for immediate capture (default: 5)')
     schedule_parser.set_defaults(func=cmd_schedule)
     
     # Historical command
