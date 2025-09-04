@@ -110,12 +110,13 @@ class ConfigManager:
         Returns:
             Tuple of (username, password)
         """
-        username = self.get('camera.username')
+        # Check for username in environment first, then config
+        username = self.get_secret('CAMERA_USERNAME') or self.get('camera.username')
         password = self.get_secret('CAMERA_PASSWORD')
         
         if not username or not password:
             raise ValueError("Camera credentials not properly configured. "
-                           "Set CAMERA_PASSWORD environment variable.")
+                           "Set CAMERA_USERNAME and CAMERA_PASSWORD environment variables.")
             
         return username, password
         

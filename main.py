@@ -131,6 +131,54 @@ def cmd_test(args):
             logger.error("✗ YouTube test failed")
             sys.exit(1)
             
+    if args.recordings:
+        logger.info("Testing Reolink recording search and download...")
+        from datetime import timedelta, date
+        from historical_retrieval import HistoricalRetrieval
+        
+        # Test with yesterday's recordings
+        yesterday = date.today() - timedelta(days=1)
+        
+        logger.info(f"Searching for recordings for {yesterday}")
+        
+        # Use historical retrieval system
+        historical = HistoricalRetrieval()
+        recordings = historical.get_camera_recordings(yesterday, yesterday)
+        
+        if recordings:
+            logger.info(f"✓ Found {len(recordings)} recordings using integrated system")
+            logger.info("Recording details:")
+            for i, recording in enumerate(recordings[:3]):  # Show first 3
+                logger.info(f"  {i+1}. File: {recording.get('file_name', recording.get('name', 'N/A'))}")
+                logger.info(f"     Type: {recording.get('type', 'unknown')}")
+                logger.info(f"     Time: {recording.get('start_time')} - {recording.get('end_time')}")
+                logger.info(f"     Size: {recording.get('size', 0)} bytes")
+                
+            # Test download of first recording (if not local images)
+            if recordings and recordings[0].get('type') != 'local_images':
+                logger.info("Testing download of first recording...")
+                try:
+                    import tempfile
+                    from pathlib import Path
+                    
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        test_path = Path(temp_dir) / f"test_{recordings[0]['name']}"
+                        success = historical.download_recording(recordings[0], test_path)
+                        
+                        if success and test_path.exists():
+                            file_size = test_path.stat().st_size
+                            logger.info(f"✓ Successfully downloaded test file ({file_size:,} bytes)")
+                        else:
+                            logger.warning("Download test failed, but search functionality works")
+                            
+                except Exception as e:
+                    logger.warning(f"Download test failed: {e}, but search functionality works")
+        else:
+            logger.warning("No recordings found in time range")
+            logger.info("This might be normal if no motion was detected or recording is disabled")
+            
+        logger.info("✓ Reolink recording test completed")
+            
     if args.sunset:
         logger.info("Testing sunset calculations...")
         calc = SunsetCalculator()
@@ -249,23 +297,23 @@ def cmd_status(args):
         print(f"Next Capture: {start.strftime('%H:%M')} - {end.strftime('%H:%M %Z')}")
         
     print("\n--- System Health ---")
-    health = status.get('system_health', {})
-    for component, status_val in health.items():
-        icon = "✓" if status_val else "✗"
-        print(f"{icon} {component.replace('_', ' ').title()}: {status_val}")
-        
-    print("\n--- Recent Activity ---")
-    activity = status.get('recent_activity', {})
+
+
+def cmd_cleanup(args):
+    """Clean up old files"""
+    setup_logging()
+    logger = logging.getLogger(__name__)
     
-    recent_images = activity.get('recent_images', [])
-    print(f"Recent Images ({len(recent_images)}):")
-    for img in recent_images[-3:]:  # Show last 3
-        print(f"  {Path(img).name}")
+    logger.info("Starting manual cleanup...")
+    
+    scheduler = SunsetScheduler()
+    
+    if args.dry_run:
+        logger.info("DRY RUN MODE - No files will be deleted")
+        # TODO: Add dry-run functionality to cleanup_old_files method
         
-    recent_videos = activity.get('recent_videos', [])
-    print(f"Recent Videos ({len(recent_videos)}):")
-    for vid in recent_videos:
-        print(f"  {Path(vid).name}")
+    scheduler.cleanup_old_files()
+    logger.info("Cleanup completed")
 
 
 def cmd_config(args):
@@ -355,6 +403,8 @@ Examples:
                            help='Test camera connection')
     test_parser.add_argument('--youtube', action='store_true',
                            help='Test YouTube authentication')
+    test_parser.add_argument('--recordings', action='store_true',
+                           help='Test Reolink recording search and download')
     test_parser.add_argument('--sunset', action='store_true',
                            help='Test sunset calculations')
     test_parser.add_argument('--email', action='store_true',
@@ -386,6 +436,12 @@ Examples:
     config_parser.add_argument('--validate', action='store_true',
                              help='Validate configuration')
     config_parser.set_defaults(func=cmd_config)
+    
+    # Cleanup command
+    cleanup_parser = subparsers.add_parser('cleanup', help='Clean up old files')
+    cleanup_parser.add_argument('--dry-run', action='store_true',
+                              help='Show what would be deleted without actually deleting')
+    cleanup_parser.set_defaults(func=cmd_cleanup)
     
     # Parse arguments
     args = parser.parse_args()

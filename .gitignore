@@ -9,6 +9,7 @@ config-pi.yaml
 *token*
 *credentials*
 *secret*
+BLOG_POST.md
 
 # Python
 __pycache__/

@@ -63,11 +63,11 @@ class HistoricalRetrieval:
         recordings = []
         
         # First check for locally stored images
-        local_recordings = self._check_local_images(start_date, end_date)
-        if local_recordings:
-            self.logger.info(f"Found {len(local_recordings)} local image sets")
-            recordings.extend(local_recordings)
-            return recordings
+        #local_recordings = self._check_local_images(start_date, end_date)
+        #if local_recordings:
+        #    self.logger.info(f"Found {len(local_recordings)} local image sets")
+        #    recordings.extend(local_recordings)
+        #    return recordings
         
         # Try RTSP playback detection for SD card recordings
         rtsp_recordings = self._try_rtsp_playback_search(start_date, end_date)
@@ -76,6 +76,13 @@ class HistoricalRetrieval:
             recordings.extend(rtsp_recordings)
             return recordings
         
+        # Try Reolink official API for SD card recordings
+        reolink_recordings = self._try_reolink_official_api(start_date, end_date)
+        if reolink_recordings:
+            self.logger.info(f"Found {len(reolink_recordings)} recordings via Reolink official API")
+            recordings.extend(reolink_recordings)
+            return recordings
+
         # If no local images, attempt camera API (may fail due to HTTP API limitations)
         try:
             self.logger.warning("No local images found, attempting camera HTTP API (may not work on this camera)")
@@ -141,6 +148,83 @@ class HistoricalRetrieval:
         except Exception as e:
             self.logger.error(f"Failed to get camera recordings via HTTP API: {e}")
             self.logger.info("Camera HTTP API not available - use live capture mode instead")
+            
+        return recordings
+
+    def _try_reolink_official_api(self, start_date: date, end_date: date) -> List[Dict]:
+        """
+        Try to get recordings using the official Reolink API library
+        
+        Args:
+            start_date: Start date for search
+            end_date: End date for search
+            
+        Returns:
+            List of recording metadata dictionaries
+        """
+        recordings = []
+        
+        try:
+            # Try to import the official Reolink API library
+            from reolinkapi import Camera as ReoCamera
+            
+            self.logger.info("Using official Reolink API to search for recordings")
+            
+            # Create camera instance
+            reo_camera = ReoCamera(self.ip, self.username, self.password)
+            
+            # Search for motion recordings in date range
+            current_date = start_date
+            while current_date <= end_date:
+                try:
+                    # Get motion files for this date
+                    start_datetime = datetime.combine(current_date, datetime.min.time())
+                    end_datetime = datetime.combine(current_date, datetime.max.time())
+                    
+                    motion_files = reo_camera.get_motion_files(
+                        start=start_datetime,
+                        end=end_datetime,
+                        streamtype='main',
+                        channel=0
+                    )
+                    
+                    if motion_files:
+                        self.logger.info(f"Found {len(motion_files)} motion files for {current_date}")
+                        
+                        # Debug: log the first file structure
+                        if motion_files:
+                            self.logger.debug(f"Sample motion file data: {motion_files[0]}")
+                        
+                        for motion_file in motion_files:
+                            # Convert to our standard format
+                            # The motion_file structure: {'start': datetime, 'end': datetime, 'filename': 'path'}
+                            file_name = motion_file.get('filename') or motion_file.get('name') or motion_file.get('fileName', 'unknown')
+                            file_size = motion_file.get('size') or motion_file.get('fileSize') or motion_file.get('file_size', 0)
+                            start_time = motion_file.get('start') or motion_file.get('start_time') or motion_file.get('startTime')
+                            end_time = motion_file.get('end') or motion_file.get('end_time') or motion_file.get('endTime')
+                            
+                            recordings.append({
+                                'name': file_name,
+                                'file_name': file_name,
+                                'size': file_size,
+                                'start_time': start_time,
+                                'end_time': end_time,
+                                'type': 'reolink_motion',
+                                'api_method': 'official',
+                                'reolink_data': motion_file  # Store original data
+                            })
+                    else:
+                        self.logger.debug(f"No motion files found for {current_date}")
+                        
+                except Exception as date_error:
+                    self.logger.error(f"Failed to get motion files for {current_date}: {date_error}")
+                    
+                current_date += timedelta(days=1)
+                
+        except ImportError:
+            self.logger.warning("Reolink API library not available. Install with: pip install git+https://github.com/ReolinkCameraAPI/reolinkapipy.git")
+        except Exception as e:
+            self.logger.error(f"Failed to use Reolink official API: {e}")
             
         return recordings
         
@@ -242,6 +326,12 @@ class HistoricalRetrieval:
                     # Look for image files in this date directory
                     image_files = list(date_dir.glob('*.jpg')) + list(date_dir.glob('*.jpeg')) + list(date_dir.glob('*.png'))
                     
+                    # Also check historical subdirectory
+                    historical_dir = date_dir / 'historical'
+                    if historical_dir.exists():
+                        historical_images = list(historical_dir.glob('*.jpg')) + list(historical_dir.glob('*.jpeg')) + list(historical_dir.glob('*.png'))
+                        image_files.extend(historical_images)
+                    
                     if image_files:
                         # Sort by filename (which should contain timestamp)
                         image_files.sort()
@@ -259,12 +349,16 @@ class HistoricalRetrieval:
                             first_time = datetime.fromtimestamp(first_image.stat().st_mtime)
                             last_time = datetime.fromtimestamp(last_image.stat().st_mtime)
                             
+                        # Check if we have historical images
+                        has_historical = any(f.parent.name == 'historical' for f in image_files)
+                        image_type = 'local_historical' if has_historical else 'local_images'
+                        
                         local_recordings.append({
                             'name': f'local_images_{date_str}',
                             'size': sum(f.stat().st_size for f in image_files),
                             'start_time': first_time,
                             'end_time': last_time,
-                            'type': 'local_images',
+                            'type': image_type,
                             'image_count': len(image_files),
                             'image_files': image_files
                         })
@@ -373,7 +467,58 @@ class HistoricalRetrieval:
         """
         try:
             filename = recording_info['name']
-            self.logger.info(f"Downloading recording: {filename}")
+            recording_type = recording_info.get('type', 'unknown')
+            self.logger.info(f"Downloading recording: {filename} (type: {recording_type})")
+            
+            # Use official Reolink API if available
+            if recording_type == 'reolink_motion' and recording_info.get('api_method') == 'official':
+                return self._download_via_official_api(recording_info, output_path)
+            
+            # Fallback to HTTP API method
+            return self._download_via_http_api(recording_info, output_path)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to download recording {recording_info.get('name')}: {e}")
+            return False
+            
+    def _download_via_official_api(self, recording_info: Dict, output_path: Path) -> bool:
+        """Download recording using official Reolink API"""
+        try:
+            from reolinkapi import Camera as ReoCamera
+            
+            reolink_data = recording_info.get('reolink_data', {})
+            filename = reolink_data.get('name', recording_info['name'])
+            
+            self.logger.info(f"Downloading via official Reolink API: {filename}")
+            
+            # Create camera instance
+            reo_camera = ReoCamera(self.ip, self.username, self.password)
+            
+            # Ensure output directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Download the file directly to output path
+            success = reo_camera.get_file(filename, str(output_path))
+            
+            if success and output_path.exists():
+                file_size = output_path.stat().st_size
+                self.logger.info(f"Downloaded: {output_path} ({file_size:,} bytes)")
+                return True
+            else:
+                self.logger.error(f"Failed to download file {filename}")
+                return False
+                
+        except ImportError:
+            self.logger.warning("Reolink API library not available, falling back to HTTP API")
+            return self._download_via_http_api(recording_info, output_path)
+        except Exception as e:
+            self.logger.error(f"Failed to download via official API: {e}")
+            return False
+            
+    def _download_via_http_api(self, recording_info: Dict, output_path: Path) -> bool:
+        """Download recording using HTTP API (fallback method)"""
+        try:
+            filename = recording_info['name']
             
             # Reolink download URL format
             download_url = f"http://{self.ip}/flv"
@@ -416,7 +561,7 @@ class HistoricalRetrieval:
             return True
             
         except Exception as e:
-            self.logger.error(f"Failed to download recording {recording_info.get('name')}: {e}")
+            self.logger.error(f"Failed to download via HTTP API: {e}")
             return False
             
     def extract_frames_from_recording(self, video_path: Path, 
@@ -454,9 +599,9 @@ class HistoricalRetrieval:
             
             self.logger.info(f"Video properties: {fps:.2f} FPS, {total_frames} frames, {duration:.1f}s")
             
-            # Calculate frame extraction parameters
-            duration_seconds = (end_time - start_time).total_seconds()
-            frames_to_extract = int(duration_seconds / interval_seconds)
+            # Calculate frame extraction parameters based on actual video duration
+            video_duration_seconds = duration  # Use actual video duration
+            frames_to_extract = int(video_duration_seconds / interval_seconds)
             frame_interval = int(fps * interval_seconds)
             
             self.logger.info(f"Extracting {frames_to_extract} frames at {interval_seconds}s intervals")
@@ -548,25 +693,50 @@ class HistoricalRetrieval:
                 
             self.logger.info(f"Found {len(relevant_recordings)} relevant recordings")
             
-            # Download and process recordings
+            # Process recordings based on type
             all_frames = []
             temp_dir = self.config.get_storage_paths()['temp']
             
             for recording in relevant_recordings:
-                # Download recording
-                video_filename = f"historical_{target_date}_{recording['name']}"
-                video_path = temp_dir / video_filename
+                recording_type = recording.get('type', 'unknown')
                 
-                if self.download_recording(recording, video_path):
-                    # Extract frames for sunset window
-                    frames = self.extract_frames_from_recording(
-                        video_path, start_time, end_time,
-                        self.config.get('capture.interval_seconds', 5)
-                    )
-                    all_frames.extend(frames)
+                if recording_type in ['local_images', 'local_historical']:
+                    # For local images, return existing image files
+                    self.logger.info(f"Using existing local images for {target_date}")
+                    image_files = recording.get('image_files', [])
                     
-                    # Clean up downloaded video
-                    video_path.unlink()
+                    # Filter images by sunset time window if needed
+                    filtered_images = []
+                    for img_path in image_files:
+                        try:
+                            # Extract timestamp from filename
+                            img_time = self._extract_timestamp_from_filename(img_path.name)
+                            if start_time <= img_time <= end_time:
+                                filtered_images.append(img_path)
+                        except:
+                            # If we can't parse timestamp, include all images
+                            filtered_images.append(img_path)
+                    
+                    all_frames.extend(filtered_images)
+                    self.logger.info(f"Found {len(filtered_images)} images in sunset window")
+                    
+                else:
+                    # For remote recordings, download and extract frames
+                    video_filename = f"historical_{target_date}_{recording['name']}"
+                    video_path = temp_dir / video_filename
+                    
+                    if self.download_recording(recording, video_path):
+                        # Extract frames using actual recording timestamps
+                        rec_start = recording['start_time']
+                        rec_end = recording['end_time']
+                        frames = self.extract_frames_from_recording(
+                            video_path, rec_start, rec_end,
+                            self.config.get('capture.interval_seconds', 5)
+                        )
+                        all_frames.extend(frames)
+                        
+                        # Clean up downloaded video
+                        video_path.unlink()
                     
             if all_frames:
                 # Sort frames by timestamp
@@ -617,8 +787,11 @@ class HistoricalRetrieval:
                         # Upload to YouTube if requested
                         if upload_to_youtube:
                             try:
-                                self.youtube_uploader.upload_to_youtube(
-                                    video_path, current_date
+                                # Calculate start and end times for this date
+                                sunset_start, sunset_end = self.sunset_calc.get_capture_window(current_date)
+                                
+                                self.youtube_uploader.upload_video(
+                                    video_path, current_date, sunset_start, sunset_end
                                 )
                             except Exception as e:
                                 self.logger.warning(f"YouTube upload failed for {current_date}: {e}")

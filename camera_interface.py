@@ -532,3 +532,715 @@ class CameraInterface:
         except Exception as e:
             self.logger.error(f"RTSP test failed: {e}")
             return False
+
+    def connect_onvif(self) -> bool:
+        """
+        Connect to camera via ONVIF for advanced features like replay
+        
+        Returns:
+            True if ONVIF connection successful, False otherwise
+        """
+        if not ONVIFCamera:
+            self.logger.error("ONVIF library not available")
+            return False
+            
+        try:
+            self.logger.info(f"Connecting to camera via ONVIF at {self.ip}:{self.onvif_port}")
+            
+            # Create ONVIF camera connection
+            self.camera = ONVIFCamera(
+                self.ip, 
+                self.onvif_port, 
+                self.username, 
+                self.password
+            )
+            
+            # Test connection by getting device information
+            device_service = self.camera.create_devicemgmt_service()
+            device_info = device_service.GetDeviceInformation()
+            
+            self.logger.info(f"ONVIF connected - {device_info.Manufacturer} {device_info.Model}")
+            
+            # Get media service for stream info
+            self.media_service = self.camera.create_media_service()
+            
+            self._connected = True
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"ONVIF connection failed: {e}")
+            self._connected = False
+            return False
+
+    def get_recordings(self, start_time: datetime, end_time: datetime) -> List[dict]:
+        """
+        Search for recorded videos in the specified time range via ONVIF
+        
+        Args:
+            start_time: Start time for search
+            end_time: End time for search
+            
+        Returns:
+            List of recording information dictionaries
+        """
+        if not self.camera:
+            self.logger.error("Camera not connected via ONVIF")
+            return []
+            
+        try:
+            # Create search service
+            search_service = self.camera.create_search_service()
+            
+            # Create search parameters
+            search_params = {
+                'StreamType': 'RtspUnicast',
+                'Scope': {
+                    'IncludeRecordings': True,
+                    'RecordingInformationFilter': {}
+                },
+                'MaxMatches': 100,
+                'StartPoint': start_time.isoformat(),
+                'EndPoint': end_time.isoformat()
+            }
+            
+            self.logger.info(f"Searching for recordings from {start_time} to {end_time}")
+            
+            # Find recordings
+            search_result = search_service.FindRecordings(search_params)
+            
+            recordings = []
+            if hasattr(search_result, 'RecordingInformation'):
+                for recording in search_result.RecordingInformation:
+                    recordings.append({
+                        'token': recording.RecordingToken,
+                        'start_time': recording.EarliestRecording,
+                        'end_time': recording.LatestRecording,
+                        'source': recording.Source
+                    })
+                    
+            self.logger.info(f"Found {len(recordings)} recordings")
+            return recordings
+            
+        except Exception as e:
+            self.logger.error(f"Failed to search recordings: {e}")
+            return []
+
+    def download_recording(self, recording_token: str, save_path: Path) -> bool:
+        """
+        Download a recorded video via ONVIF replay
+        
+        Args:
+            recording_token: Token identifying the recording
+            save_path: Path where to save the downloaded video
+            
+        Returns:
+            True if download successful, False otherwise
+        """
+        if not self.camera:
+            self.logger.error("Camera not connected via ONVIF")
+            return False
+            
+        try:
+            # Create replay service
+            replay_service = self.camera.create_replay_service()
+            
+            # Set up stream configuration
+            stream_setup = {
+                'Stream': 'RTP-Unicast',
+                'Transport': {
+                    'Protocol': 'RTSP'
+                }
+            }
+            
+            # Get replay URI
+            replay_params = {
+                'RecordingToken': recording_token,
+                'StreamSetup': stream_setup
+            }
+            
+            replay_result = replay_service.GetReplayUri(replay_params)
+            replay_uri = replay_result.Uri
+            
+            self.logger.info(f"Got replay URI: {self._sanitize_rtsp_url_for_logging(replay_uri)}")
+            
+            # Download video using ffmpeg
+            import subprocess
+            
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', replay_uri,
+                '-c', 'copy',  # Stream copy to avoid re-encoding
+                '-avoid_negative_ts', 'make_zero',
+                str(save_path)
+            ]
+            
+            # Create sanitized command for logging
+            cmd_safe = cmd.copy()
+            cmd_safe[cmd_safe.index(replay_uri)] = self._sanitize_rtsp_url_for_logging(replay_uri)
+            self.logger.info(f"Downloading recording: {' '.join(cmd_safe)}")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # 30 min timeout
+            
+            if result.returncode == 0:
+                self.logger.info(f"Successfully downloaded recording to {save_path}")
+                return True
+            else:
+                self.logger.error(f"Failed to download recording: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error("Recording download timed out")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to download recording: {e}")
+            return False
+
+    def download_recordings_by_time(self, start_time: datetime, end_time: datetime, 
+                                   save_dir: Path) -> List[Path]:
+        """
+        Download all recordings in a time range
+        
+        Args:
+            start_time: Start time for recordings
+            end_time: End time for recordings  
+            save_dir: Directory to save downloaded videos
+            
+        Returns:
+            List of paths to downloaded video files
+        """
+        downloaded_files = []
+        
+        # Ensure ONVIF connection
+        if not self.camera and not self.connect_onvif():
+            self.logger.error("Failed to connect via ONVIF for recording download")
+            return downloaded_files
+            
+        # Search for recordings
+        recordings = self.get_recordings(start_time, end_time)
+        
+        if not recordings:
+            self.logger.warning("No recordings found in specified time range")
+            return downloaded_files
+            
+        # Download each recording
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        for i, recording in enumerate(recordings):
+            # Generate filename
+            filename = f"recording_{start_time.strftime('%Y%m%d_%H%M')}_{i+1}.mp4"
+            save_path = save_dir / filename
+            
+            if self.download_recording(recording['token'], save_path):
+                downloaded_files.append(save_path)
+            else:
+                self.logger.warning(f"Failed to download recording {i+1}")
+                
+        self.logger.info(f"Downloaded {len(downloaded_files)}/{len(recordings)} recordings")
+        return downloaded_files
+
+    def download_reolink_recording(self, start_time: datetime, end_time: datetime, 
+                                   save_path: Path) -> bool:
+        """
+        Download recorded video via Reolink HTTP API
+        
+        Args:
+            start_time: Start time for recording
+            end_time: End time for recording
+            save_path: Path where to save the downloaded video
+            
+        Returns:
+            True if download successful, False otherwise
+        """
+        try:
+            # Build Reolink API URL for playback
+            base_url = f"http://{self.ip}/cgi-bin/api.cgi"
+            
+            # Format times for Reolink API
+            start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+            end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Reolink playback parameters
+            params = {
+                'cmd': 'Playback',
+                'user': self.username,
+                'password': self.password,
+                'channel': 0,
+                'streamType': 'main',  # or 'sub' for lower quality
+                'startTime': start_str,
+                'endTime': end_str
+            }
+            
+            self.logger.info(f"Downloading Reolink recording from {start_str} to {end_str}")
+            self.logger.info(f"API URL: http://{self.ip}/cgi-bin/api.cgi?cmd=Playback&...")
+            
+            # Make request with streaming (disable SSL verification for self-signed certs)
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            response = requests.get(base_url, params=params, stream=True, timeout=1800, 
+                                  verify=False, allow_redirects=True)
+            response.raise_for_status()
+            
+            # Check content type
+            content_type = response.headers.get('content-type', '')
+            self.logger.info(f"Response content-type: {content_type}")
+            
+            if 'video' not in content_type.lower() and 'application' not in content_type.lower():
+                self.logger.error(f"Unexpected content type: {content_type}")
+                # Try to read response as text to see error message
+                try:
+                    error_text = response.text[:500]
+                    self.logger.error(f"Response: {error_text}")
+                except:
+                    pass
+                return False
+            
+            # Download the video file
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            total_size = 0
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        total_size += len(chunk)
+                        
+                        # Log progress every 10MB
+                        if total_size % (10 * 1024 * 1024) == 0:
+                            self.logger.info(f"Downloaded {total_size // (1024 * 1024)}MB...")
+            
+            self.logger.info(f"Successfully downloaded {total_size // (1024 * 1024)}MB to {save_path}")
+            return True
+            
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"HTTP request failed: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to download Reolink recording: {e}")
+            return False
+
+    def list_reolink_recordings(self, start_time: datetime, end_time: datetime) -> List[dict]:
+        """
+        List available recordings via Reolink HTTP API
+        
+        Args:
+            start_time: Start time for search
+            end_time: End time for search
+            
+        Returns:
+            List of recording information dictionaries
+        """
+        try:
+            # Build Reolink API URL for search
+            base_url = f"http://{self.ip}/cgi-bin/api.cgi"
+            
+            # Format times for Reolink API
+            start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+            end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # RLC-810WA API formats - try JSON POST method first
+            import json
+            
+            # Modern Reolink API uses JSON POST requests
+            json_payload = [{
+                "cmd": "Search",
+                "action": 0,
+                "param": {
+                    "Search": {
+                        "channel": 0,
+                        "onlyStatus": 1,
+                        "streamType": "main",
+                        "StartTime": {
+                            "year": start_time.year,
+                            "mon": start_time.month,
+                            "day": start_time.day,
+                            "hour": start_time.hour,
+                            "min": start_time.minute,
+                            "sec": start_time.second
+                        },
+                        "EndTime": {
+                            "year": end_time.year,
+                            "mon": end_time.month,
+                            "day": end_time.day,
+                            "hour": end_time.hour,
+                            "min": end_time.minute,
+                            "sec": end_time.second
+                        }
+                    }
+                }
+            }]
+            
+            # Fallback GET parameter formats - try different password encodings
+            import urllib.parse
+            
+            params_list = [
+                # Standard encoding
+                {
+                    'cmd': 'Search',
+                    'user': self.username,
+                    'password': self.password,
+                    'channel': 0,
+                    'onlyStatus': 1,
+                    'streamType': 'main',
+                    'startTime': start_str,
+                    'endTime': end_str
+                },
+                # No encoding for special characters
+                {
+                    'cmd': 'Search',
+                    'user': self.username,
+                    'password': urllib.parse.unquote(self.password),
+                    'channel': 0,
+                    'onlyStatus': 1,
+                    'streamType': 'main',
+                    'startTime': start_str,
+                    'endTime': end_str
+                },
+                # Alternative command
+                {
+                    'cmd': 'GetRecFiles', 
+                    'user': self.username,
+                    'password': self.password,
+                    'channel': 0,
+                    'startTime': start_str,
+                    'endTime': end_str
+                },
+                # HTTP Basic Auth method
+                {
+                    'cmd': 'Search',
+                    'channel': 0,
+                    'onlyStatus': 1,
+                    'streamType': 'main',
+                    'startTime': start_str,
+                    'endTime': end_str
+                }
+            ]
+            
+            self.logger.info(f"Searching Reolink recordings from {start_str} to {end_str}")
+            
+            # Disable SSL warnings for self-signed certificates
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            # First try modern JSON POST API
+            try:
+                self.logger.info("Trying modern JSON POST API format")
+                
+                # Login first to get token (for newer firmware)
+                login_payload = [{
+                    "cmd": "Login",
+                    "action": 0,
+                    "param": {
+                        "User": {
+                            "userName": self.username,
+                            "password": self.password
+                        }
+                    }
+                }]
+                
+                # Try login
+                response = requests.post(base_url, json=login_payload, timeout=30, 
+                                       verify=False, allow_redirects=True)
+                
+                if response.status_code == 200:
+                    try:
+                        login_result = response.json()
+                        if login_result and len(login_result) > 0 and login_result[0].get('value'):
+                            token = login_result[0]['value']['Token']['name']
+                            self.logger.info(f"Got authentication token: {token[:10]}...")
+                            
+                            # Now search with token
+                            json_payload[0]['param']['Search']['token'] = token
+                            response = requests.post(base_url, json=json_payload, timeout=60,
+                                                   verify=False, allow_redirects=True)
+                            
+                            if response.status_code == 200:
+                                try:
+                                    result = response.json()
+                                    self.logger.info("Got JSON response from modern API")
+                                    
+                                    recordings = []
+                                    if result and len(result) > 0 and 'value' in result[0]:
+                                        search_result = result[0]['value']['SearchResult']
+                                        if 'File' in search_result:
+                                            for file_info in search_result['File']:
+                                                recordings.append({
+                                                    'start_time': f"{file_info['StartTime']['year']:04d}-{file_info['StartTime']['mon']:02d}-{file_info['StartTime']['day']:02d} {file_info['StartTime']['hour']:02d}:{file_info['StartTime']['min']:02d}:{file_info['StartTime']['sec']:02d}",
+                                                    'end_time': f"{file_info['EndTime']['year']:04d}-{file_info['EndTime']['mon']:02d}-{file_info['EndTime']['day']:02d} {file_info['EndTime']['hour']:02d}:{file_info['EndTime']['min']:02d}:{file_info['EndTime']['sec']:02d}",
+                                                    'file_size': file_info.get('size', 0),
+                                                    'file_name': file_info.get('name', ''),
+                                                    'type': file_info.get('type', 'unknown')
+                                                })
+                                    
+                                    if recordings:
+                                        self.logger.info(f"Found {len(recordings)} recordings with modern API")
+                                        return recordings
+                                    else:
+                                        self.logger.info("Modern API worked but returned no recordings")
+                                        
+                                except ValueError:
+                                    self.logger.warning("Modern API: Failed to parse JSON response")
+                        else:
+                            self.logger.warning("Modern API: Login failed")
+                    except ValueError:
+                        self.logger.warning("Modern API: Login response not JSON")
+                else:
+                    self.logger.warning(f"Modern API: Login returned status {response.status_code}")
+                    
+            except Exception as e:
+                self.logger.warning(f"Modern API failed: {e}")
+            
+            # Fallback to GET parameter formats
+            for i, params in enumerate(params_list):
+                try:
+                    self.logger.info(f"Trying API format {i+1}: {params.get('cmd', params.get('action'))}")
+                    
+                    # Try both parameter-based auth and HTTP Basic Auth
+                    if 'password' in params:
+                        # Parameter-based auth (current approach)
+                        response = requests.get(base_url, params=params, timeout=60, 
+                                              verify=False, allow_redirects=True)
+                    else:
+                        # HTTP Basic Auth approach
+                        from requests.auth import HTTPBasicAuth
+                        auth_params = {k: v for k, v in params.items() if k not in ['user', 'password']}
+                        response = requests.get(base_url, params=auth_params, 
+                                              auth=HTTPBasicAuth(self.username, self.password),
+                                              timeout=60, verify=False, allow_redirects=True)
+                    response.raise_for_status()
+                    
+                    # Check if response looks like JSON
+                    content_type = response.headers.get('content-type', '').lower()
+                    if 'json' in content_type or response.text.strip().startswith(('{', '[')):
+                        try:
+                            result = response.json()
+                            self.logger.info(f"Got JSON response with format {i+1}")
+                            
+                            recordings = []
+                            
+                            # Debug: log the actual response structure
+                            self.logger.debug(f"Response structure: {result}")
+                            
+                            # Check for authentication errors first
+                            if isinstance(result, list) and len(result) > 0:
+                                if 'error' in result[0]:
+                                    error_info = result[0]['error']
+                                    if error_info.get('rspCode') == -502:
+                                        self.logger.error(f"Authentication failed: {error_info.get('detail', 'Unknown error')}")
+                                        # Try without URL encoding special characters
+                                        continue
+                            
+                            # Try different response structures
+                            if result and 'value' in result and 'SearchResult' in result['value']:
+                                search_results = result['value']['SearchResult']
+                                for item in search_results:
+                                    recordings.append({
+                                        'start_time': item.get('StartTime'),
+                                        'end_time': item.get('EndTime'),
+                                        'file_size': item.get('Size', 0),
+                                        'file_name': item.get('FileName', ''),
+                                        'type': item.get('Type', 'unknown')
+                                    })
+                            elif isinstance(result, list):
+                                # Direct list format - also try to parse different structures
+                                for item in result:
+                                    # Check if this has a 'value' key with recording data
+                                    if 'value' in item and 'SearchResult' in item['value']:
+                                        search_result = item['value']['SearchResult']
+                                        if 'File' in search_result:
+                                            for file_info in search_result['File']:
+                                                recordings.append({
+                                                    'start_time': f"{file_info['StartTime']['year']:04d}-{file_info['StartTime']['mon']:02d}-{file_info['StartTime']['day']:02d} {file_info['StartTime']['hour']:02d}:{file_info['StartTime']['min']:02d}:{file_info['StartTime']['sec']:02d}",
+                                                    'end_time': f"{file_info['EndTime']['year']:04d}-{file_info['EndTime']['mon']:02d}-{file_info['EndTime']['day']:02d} {file_info['EndTime']['hour']:02d}:{file_info['EndTime']['min']:02d}:{file_info['EndTime']['sec']:02d}",
+                                                    'file_size': file_info.get('size', 0),
+                                                    'file_name': file_info.get('name', ''),
+                                                    'type': file_info.get('type', 'unknown')
+                                                })
+                                        elif 'Status' in search_result:
+                                            # Status-only response, no actual files
+                                            status = search_result['Status']
+                                            if status.get('rspCode') == 200:
+                                                self.logger.info("Search successful but no recordings in time range")
+                                    else:
+                                        # Simple format
+                                        recordings.append({
+                                            'start_time': item.get('start_time', item.get('StartTime')),
+                                            'end_time': item.get('end_time', item.get('EndTime')),
+                                            'file_size': item.get('size', item.get('Size', 0)),
+                                            'file_name': item.get('name', item.get('FileName', '')),
+                                            'type': item.get('type', item.get('Type', 'unknown'))
+                                        })
+                            elif result and 'SearchResult' in result:
+                                # Direct SearchResult format
+                                search_result = result['SearchResult']
+                                if 'File' in search_result:
+                                    for file_info in search_result['File']:
+                                        recordings.append({
+                                            'start_time': f"{file_info['StartTime']['year']:04d}-{file_info['StartTime']['mon']:02d}-{file_info['StartTime']['day']:02d} {file_info['StartTime']['hour']:02d}:{file_info['StartTime']['min']:02d}:{file_info['StartTime']['sec']:02d}",
+                                            'end_time': f"{file_info['EndTime']['year']:04d}-{file_info['EndTime']['mon']:02d}-{file_info['EndTime']['day']:02d} {file_info['EndTime']['hour']:02d}:{file_info['EndTime']['min']:02d}:{file_info['EndTime']['sec']:02d}",
+                                            'file_size': file_info.get('size', 0),
+                                            'file_name': file_info.get('name', ''),
+                                            'type': file_info.get('type', 'unknown')
+                                        })
+                            
+                            if recordings:
+                                self.logger.info(f"Found {len(recordings)} recordings with format {i+1}")
+                                return recordings
+                            else:
+                                self.logger.info(f"Format {i+1} worked but returned no recordings")
+                                
+                        except ValueError:
+                            self.logger.warning(f"Format {i+1}: Response looked like JSON but failed to parse")
+                            continue
+                    else:
+                        self.logger.warning(f"Format {i+1}: Got non-JSON response")
+                        if i == 0:  # Show response details for first attempt only
+                            response_text = response.text[:200]
+                            self.logger.debug(f"Response preview: {response_text}")
+                        continue
+                        
+                except requests.exceptions.RequestException as e:
+                    self.logger.warning(f"Format {i+1} failed: {e}")
+                    continue
+            
+            self.logger.info("No recordings found with any API format")
+            return []
+            
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"HTTP request failed: {e}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Failed to list Reolink recordings: {e}")
+            return []
+
+    def download_reolink_recordings_by_time(self, start_time: datetime, end_time: datetime, 
+                                           save_dir: Path) -> List[Path]:
+        """
+        Download Reolink recordings in a time range
+        
+        Args:
+            start_time: Start time for recordings
+            end_time: End time for recordings  
+            save_dir: Directory to save downloaded videos
+            
+        Returns:
+            List of paths to downloaded video files
+        """
+        downloaded_files = []
+        
+        # List available recordings first
+        recordings = self.list_reolink_recordings(start_time, end_time)
+        
+        if not recordings:
+            self.logger.warning("No Reolink recordings found in specified time range")
+            # Try downloading the entire time range as one file
+            filename = f"reolink_recording_{start_time.strftime('%Y%m%d_%H%M')}_{end_time.strftime('%H%M')}.mp4"
+            save_path = save_dir / filename
+            
+            if self.download_reolink_recording(start_time, end_time, save_path):
+                downloaded_files.append(save_path)
+        else:
+            # Download each individual recording
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            for i, recording in enumerate(recordings):
+                # Parse recording times
+                try:
+                    rec_start = datetime.strptime(recording['start_time'], "%Y-%m-%d %H:%M:%S")
+                    rec_end = datetime.strptime(recording['end_time'], "%Y-%m-%d %H:%M:%S")
+                except:
+                    self.logger.warning(f"Could not parse recording times for recording {i+1}")
+                    continue
+                
+                # Generate filename
+                filename = f"reolink_{rec_start.strftime('%Y%m%d_%H%M%S')}_{rec_end.strftime('%H%M%S')}.mp4"
+                save_path = save_dir / filename
+                
+                if self.download_reolink_recording(rec_start, rec_end, save_path):
+                    downloaded_files.append(save_path)
+                else:
+                    self.logger.warning(f"Failed to download recording {i+1}")
+        
+        self.logger.info(f"Downloaded {len(downloaded_files)} Reolink recordings")
+        return downloaded_files
+
+    def download_reolink_recordings_official_api(self, start_time: datetime, end_time: datetime, 
+                                                save_dir: Path) -> List[Path]:
+        """
+        Download recordings using official Reolink API library
+        
+        Args:
+            start_time: Start time for recordings
+            end_time: End time for recordings  
+            save_dir: Directory to save downloaded videos
+            
+        Returns:
+            List of paths to downloaded video files
+        """
+        downloaded_files = []
+        
+        try:
+            from reolinkapi import Camera as ReoCamera
+            
+            # Create Reolink API camera instance
+            reo_camera = ReoCamera(self.ip, self.username, self.password)
+            
+            self.logger.info(f"Searching for recordings from {start_time} to {end_time} using Reolink API")
+            
+            # Get motion files in the time range
+            motion_files = reo_camera.get_motion_files(
+                start=start_time, 
+                end=end_time, 
+                streamtype='main',
+                channel=0
+            )
+            
+            if not motion_files:
+                self.logger.warning("No motion files found in specified time range")
+                return downloaded_files
+                
+            self.logger.info(f"Found {len(motion_files)} motion recording files")
+            
+            # Create save directory
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Download each file
+            for i, file_info in enumerate(motion_files):
+                if isinstance(file_info, dict) and 'filename' in file_info:
+                    filename = file_info['filename']
+                    start_dt = file_info.get('start', datetime.now())
+                    end_dt = file_info.get('end', datetime.now())
+                    
+                    # Generate local filename
+                    safe_filename = filename.replace('/', '_').replace('\\', '_')
+                    local_filename = f"{start_dt.strftime('%Y%m%d_%H%M%S')}_{safe_filename.split('_')[-1]}"
+                    save_path = save_dir / local_filename
+                    
+                    self.logger.info(f"Downloading file {i+1}/{len(motion_files)}: {filename}")
+                    
+                    try:
+                        success = reo_camera.get_file(
+                            filename=filename,
+                            output_path=str(save_path),
+                            method='Playback'
+                        )
+                        
+                        if success and save_path.exists():
+                            file_size = save_path.stat().st_size
+                            self.logger.info(f"✓ Downloaded {file_size // (1024*1024)}MB: {save_path.name}")
+                            downloaded_files.append(save_path)
+                        else:
+                            self.logger.warning(f"Failed to download {filename}")
+                            
+                    except Exception as download_error:
+                        self.logger.error(f"Download error for {filename}: {download_error}")
+                        
+            self.logger.info(f"Successfully downloaded {len(downloaded_files)}/{len(motion_files)} files")
+            return downloaded_files
+            
+        except ImportError:
+            self.logger.error("Reolink API library not installed. Install with: pip install git+https://github.com/ReolinkCameraAPI/reolinkapipy.git")
+            return downloaded_files
+        except Exception as e:
+            self.logger.error(f"Failed to download recordings via Reolink API: {e}")
+            return downloaded_files

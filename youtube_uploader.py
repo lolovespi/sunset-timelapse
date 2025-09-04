@@ -217,8 +217,10 @@ Interval: 5 seconds
             YouTube video ID if successful, None otherwise
         """
         if not self.is_authenticated():
-            self.logger.error("Not authenticated with YouTube")
-            return None
+            self.logger.info("Not authenticated, attempting to authenticate...")
+            if not self.authenticate():
+                self.logger.error("Failed to authenticate with YouTube")
+                return None
             
         if not video_path.exists():
             self.logger.error(f"Video file not found: {video_path}")

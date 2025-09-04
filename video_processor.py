@@ -311,10 +311,24 @@ class VideoProcessor:
         # Get paths
         paths = self.config.get_storage_paths()
         date_str = target_date.strftime('%Y-%m-%d')
-        image_dir = paths['images'] / date_str
+        base_image_dir = paths['images'] / date_str
         
-        if not image_dir.exists():
-            self.logger.error(f"No images found for date {date_str}")
+        # Check for images in multiple locations
+        image_dir = None
+        
+        # First check for historical images (from downloaded recordings)
+        historical_dir = base_image_dir / 'historical'
+        if historical_dir.exists() and list(historical_dir.glob('*.jpg')):
+            image_dir = historical_dir
+            self.logger.info(f"Using historical images from {historical_dir}")
+        
+        # Fallback to regular date directory (from live captures)
+        elif base_image_dir.exists() and list(base_image_dir.glob('*.jpg')):
+            image_dir = base_image_dir
+            self.logger.info(f"Using live capture images from {base_image_dir}")
+        
+        if not image_dir:
+            self.logger.error(f"No images found for date {date_str} (checked both live and historical)")
             return None
             
         # Generate output filename
