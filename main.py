@@ -130,6 +130,31 @@ def cmd_test(args):
         else:
             logger.error("✗ YouTube test failed")
             sys.exit(1)
+    
+    if args.youtube_token:
+        logger.info("Testing YouTube token management...")
+        token_info = scheduler.youtube_uploader.get_token_expiry_info()
+        if token_info:
+            days = token_info['days_remaining']
+            hours = token_info['hours_remaining']
+            logger.info(f"Token expires in {days} days, {hours} hours")
+            
+            # Test proactive refresh
+            refresh_success = scheduler.youtube_uploader.refresh_token_proactively()
+            if refresh_success:
+                logger.info("✓ Token refresh test passed")
+            else:
+                logger.warning("⚠ Token refresh not needed or failed")
+                
+            # Test health check and alerts
+            health_check = scheduler.youtube_uploader.check_token_health_and_alert()
+            if health_check:
+                logger.info("✓ Token health check passed")
+            else:
+                logger.error("✗ Token health check failed")
+        else:
+            logger.error("✗ No token found or token invalid")
+            sys.exit(1)
             
     if args.recordings:
         logger.info("Testing Reolink recording search and download...")
@@ -203,6 +228,117 @@ def cmd_test(args):
                 sys.exit(1)
         else:
             logger.info("✓ Email notifications disabled (test skipped)")
+    
+    if args.sbs:
+        logger.info("Testing SBS (Sunset Brilliance Score) system...")
+        from sunset_brilliance_score import SunsetBrillianceScore
+        from sbs_reporter import SBSReporter
+        import cv2
+        import numpy as np
+        
+        try:
+            # Test SBS analyzer initialization
+            sbs_analyzer = SunsetBrillianceScore()
+            logger.info("✓ SBS analyzer initialized")
+            
+            # Create test frame (sunset-like colors)
+            test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            # Create gradient from orange/red at bottom to blue at top
+            for y in range(480):
+                # Orange/red sunset colors at bottom
+                ratio = y / 480.0
+                if ratio < 0.6:  # Bottom 60% - sunset colors
+                    test_frame[y, :] = [int(50 + ratio * 100), int(100 + ratio * 100), int(200 + ratio * 50)]
+                else:  # Top 40% - sky colors  
+                    test_frame[y, :] = [200, 150, 100]
+            
+            # Test frame analysis
+            frame_metrics = sbs_analyzer.analyze_frame(test_frame, 0, 0)
+            
+            if frame_metrics:
+                logger.info(f"✓ Frame analysis successful:")
+                logger.info(f"  - Colorfulness: {frame_metrics.colorfulness:.2f}")
+                logger.info(f"  - Color Temperature: {frame_metrics.color_temperature:.0f}K")
+                logger.info(f"  - Sky Saturation: {frame_metrics.sky_saturation:.3f}")
+                logger.info(f"  - Processing Time: {frame_metrics.processing_time_ms:.2f}ms")
+                
+                # Test performance requirement (should be < 10ms on Pi)
+                if frame_metrics.processing_time_ms < 10:
+                    logger.info(f"✓ Processing performance excellent ({frame_metrics.processing_time_ms:.2f}ms < 10ms)")
+                elif frame_metrics.processing_time_ms < 20:
+                    logger.info(f"⚠ Processing performance acceptable ({frame_metrics.processing_time_ms:.2f}ms)")
+                else:
+                    logger.warning(f"⚠ Processing performance slow ({frame_metrics.processing_time_ms:.2f}ms > 20ms)")
+                    logger.info("Consider reducing analysis_resize_height in config")
+                
+                # Test chunk analysis
+                chunk_metrics = sbs_analyzer.analyze_chunk([frame_metrics], 0, 0)
+                logger.info(f"✓ Chunk analysis successful - Brilliance Score: {chunk_metrics.brilliance_score:.1f}")
+                
+                # Test SBS reporter
+                sbs_reporter = SBSReporter()
+                logger.info("✓ SBS reporter initialized")
+                
+                logger.info("✓ SBS system test passed")
+            else:
+                logger.error("✗ Frame analysis failed")
+                sys.exit(1)
+                
+        except Exception as e:
+            logger.error(f"✗ SBS test failed: {e}")
+            sys.exit(1)
+    
+    if args.sbs_sample:
+        logger.info("Testing SBS analysis on sample sunset image...")
+        from sunset_brilliance_score import SunsetBrillianceScore
+        import cv2
+        from pathlib import Path
+        
+        try:
+            # Look for recent sunset images to analyze
+            config = get_config()
+            paths = config.get_storage_paths()
+            
+            # Find the most recent sunset image
+            recent_images = []
+            for date_dir in sorted(paths['images'].glob('*'), reverse=True):
+                if date_dir.is_dir():
+                    images_in_dir = list(date_dir.glob('img_*.jpg'))
+                    if images_in_dir:
+                        recent_images.extend(images_in_dir[:5])  # Take first 5 from each date
+                        break
+            
+            if not recent_images:
+                logger.warning("No recent sunset images found for SBS sample analysis")
+                logger.info("Capture some images first using: python main.py capture --duration 300")
+                return
+            
+            # Analyze first few images
+            sbs_analyzer = SunsetBrillianceScore()
+            
+            for i, image_path in enumerate(recent_images[:3]):
+                logger.info(f"Analyzing sample image {i+1}: {image_path.name}")
+                
+                frame = cv2.imread(str(image_path))
+                if frame is not None:
+                    frame_metrics = sbs_analyzer.analyze_frame(frame, i, i * 5)
+                    
+                    if frame_metrics:
+                        logger.info(f"  Colorfulness: {frame_metrics.colorfulness:.2f}")
+                        logger.info(f"  Color Temp: {frame_metrics.color_temperature:.0f}K")
+                        logger.info(f"  Sky Saturation: {frame_metrics.sky_saturation:.3f}")
+                        logger.info(f"  Gradient Intensity: {frame_metrics.gradient_intensity:.2f}")
+                        logger.info(f"  Processing: {frame_metrics.processing_time_ms:.2f}ms")
+                    else:
+                        logger.warning(f"  Analysis failed for {image_path.name}")
+                else:
+                    logger.warning(f"  Could not load {image_path.name}")
+            
+            logger.info("✓ SBS sample analysis completed")
+            
+        except Exception as e:
+            logger.error(f"✗ SBS sample analysis failed: {e}")
+            sys.exit(1)
             
     logger.info("All tests passed!")
 
@@ -343,6 +479,108 @@ def cmd_config(args):
             sys.exit(1)
 
 
+def cmd_sbs(args):
+    """Sunset Brilliance Score analysis and reporting"""
+    setup_logging()
+    logger = logging.getLogger(__name__)
+    
+    from sbs_reporter import SBSReporter
+    from datetime import datetime, date, timedelta
+    
+    sbs_reporter = SBSReporter()
+    
+    # Determine target date
+    if args.date:
+        try:
+            target_date = datetime.strptime(args.date, '%Y-%m-%d').date()
+        except ValueError:
+            logger.error("Invalid date format. Use YYYY-MM-DD")
+            sys.exit(1)
+    else:
+        target_date = date.today() - timedelta(days=1)  # Yesterday by default
+    
+    if args.report:
+        logger.info(f"Generating SBS report for {target_date}")
+        report = sbs_reporter.generate_daily_report(target_date)
+        
+        if report:
+            print(f"\n=== SBS Report for {target_date} ===")
+            summary = report['summary']
+            print(f"Daily Brilliance Score: {summary['daily_brilliance_score']:.1f}/100")
+            print(f"Quality Grade: {summary['quality_grade']}")
+            print(f"Peak Chunk: {summary['peak_chunk']} (Score: {summary['peak_chunk_score']:.1f})")
+            print(f"Total Frames Analyzed: {summary['total_frames']}")
+            print(f"Processing Performance: {summary['avg_processing_time_ms']:.1f}ms average")
+            
+            print(f"\nChunk Breakdown ({len(report['chunk_details'])} chunks):")
+            for chunk in report['chunk_details']:
+                print(f"  Chunk {chunk['chunk_number']:2d} ({chunk['time_range']:>8}): "
+                     f"{chunk['brilliance_score']:5.1f} pts, "
+                     f"{chunk['peak_frames']:2d} peaks, "
+                     f"smoothness {chunk['temporal_smoothness']:0.3f}")
+            
+            if report['recommendations']:
+                print(f"\nRecommendations:")
+                for rec in report['recommendations']:
+                    print(f"  • {rec}")
+                    
+            logger.info("SBS report generated successfully")
+        else:
+            logger.error(f"No SBS data available for {target_date}")
+            sys.exit(1)
+    
+    if args.export:
+        if not args.start or not args.end:
+            logger.error("Export requires --start and --end dates")
+            sys.exit(1)
+            
+        try:
+            start_date = datetime.strptime(args.start, '%Y-%m-%d').date()
+            end_date = datetime.strptime(args.end, '%Y-%m-%d').date()
+        except ValueError:
+            logger.error("Invalid date format. Use YYYY-MM-DD")
+            sys.exit(1)
+        
+        logger.info(f"Exporting SBS data from {start_date} to {end_date}")
+        export_file = sbs_reporter.export_historical_analysis(start_date, end_date)
+        
+        if export_file.exists():
+            logger.info(f"SBS data exported to: {export_file}")
+            print(f"Export file: {export_file}")
+        else:
+            logger.error("Export failed")
+            sys.exit(1)
+    
+    if args.cleanup:
+        logger.info("Cleaning up old SBS analysis data...")
+        config = get_config()
+        retention_days = config.get('sbs.retention_days', 30)
+        sbs_reporter.cleanup_old_sbs_data(retention_days)
+        logger.info(f"SBS cleanup completed (retained {retention_days} days)")
+    
+    # Default action: show recent SBS summary
+    if not any([args.report, args.export, args.cleanup]):
+        logger.info(f"Showing SBS summary for {target_date}")
+        
+        from sunset_brilliance_score import SunsetBrillianceScore
+        sbs_analyzer = SunsetBrillianceScore()
+        
+        date_str = target_date.strftime('%Y-%m-%d')
+        chunk_metrics = sbs_analyzer.load_daily_analysis(date_str)
+        
+        if chunk_metrics:
+            daily_summary = sbs_analyzer.calculate_daily_summary(chunk_metrics)
+            
+            print(f"\n=== SBS Summary for {target_date} ===")
+            print(f"Brilliance Score: {daily_summary['daily_brilliance_score']:.1f}/100 (Grade {daily_summary['quality_grade']})")
+            print(f"Peak Performance: Chunk {daily_summary['peak_chunk']}")
+            print(f"Frames Analyzed: {daily_summary['total_frames']}")
+            print(f"Processing Speed: {daily_summary['avg_processing_time_ms']:.1f}ms average")
+        else:
+            logger.warning(f"No SBS data found for {target_date}")
+            print("Use 'python main.py sbs --report --date YYYY-MM-DD' to generate a full report")
+
+
 def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
@@ -403,12 +641,18 @@ Examples:
                            help='Test camera connection')
     test_parser.add_argument('--youtube', action='store_true',
                            help='Test YouTube authentication')
+    test_parser.add_argument('--youtube-token', action='store_true',
+                           help='Test YouTube token refresh and health check')
     test_parser.add_argument('--recordings', action='store_true',
                            help='Test Reolink recording search and download')
     test_parser.add_argument('--sunset', action='store_true',
                            help='Test sunset calculations')
     test_parser.add_argument('--email', action='store_true',
                            help='Test email notifications')
+    test_parser.add_argument('--sbs', action='store_true',
+                           help='Test SBS (Sunset Brilliance Score) system')
+    test_parser.add_argument('--sbs-sample', action='store_true',
+                           help='Test SBS analysis on recent sunset images')
     test_parser.set_defaults(func=cmd_test)
     
     # Capture command (on-demand test capture)
@@ -442,6 +686,19 @@ Examples:
     cleanup_parser.add_argument('--dry-run', action='store_true',
                               help='Show what would be deleted without actually deleting')
     cleanup_parser.set_defaults(func=cmd_cleanup)
+    
+    # SBS command (Sunset Brilliance Score analysis and reports)
+    sbs_parser = subparsers.add_parser('sbs', help='Sunset Brilliance Score analysis and reports')
+    sbs_parser.add_argument('--date', help='Analyze specific date (YYYY-MM-DD, default: yesterday)')
+    sbs_parser.add_argument('--report', action='store_true',
+                          help='Generate daily SBS report')
+    sbs_parser.add_argument('--export', action='store_true', 
+                          help='Export historical SBS data to CSV')
+    sbs_parser.add_argument('--start', help='Start date for export (YYYY-MM-DD)')
+    sbs_parser.add_argument('--end', help='End date for export (YYYY-MM-DD)')
+    sbs_parser.add_argument('--cleanup', action='store_true',
+                          help='Clean up old SBS analysis data')
+    sbs_parser.set_defaults(func=cmd_sbs)
     
     # Parse arguments
     args = parser.parse_args()

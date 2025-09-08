@@ -52,10 +52,15 @@ class YouTubeUploader:
         self.category_id = self.config.get('youtube.category_id', 22)
         
         self.logger.info("YouTube uploader initialized")
+    
+    def _get_token_file_path(self) -> str:
+        """Get the secure path for the YouTube token file"""
+        credentials_dir = os.path.expanduser('~/.config/sunset-timelapse/credentials')
+        return os.path.join(credentials_dir, 'youtube_token.json')
         
     def authenticate(self) -> bool:
         """
-        Authenticate with YouTube API using service account or OAuth
+        Authenticate with YouTube API using OAuth
         
         Returns:
             True if authentication successful, False otherwise
@@ -65,9 +70,9 @@ class YouTubeUploader:
             
         try:
             creds = None
-            token_file = 'youtube_token.json'
+            token_file = self._get_token_file_path()
             
-            # Check for existing token
+            # Check for existing OAuth token
             if os.path.exists(token_file):
                 creds = Credentials.from_authorized_user_file(token_file, self.SCOPES)
                 
@@ -87,7 +92,8 @@ class YouTubeUploader:
                         
                     self.logger.info("Starting OAuth flow for YouTube authentication")
                     flow = InstalledAppFlow.from_client_secrets_file(credentials_path, self.SCOPES)
-                    creds = flow.run_local_server(port=0)
+                    # Force offline access to get refresh token
+                    creds = flow.run_local_server(port=0, access_type='offline', prompt='consent')
                     
                 # Save credentials for next run
                 with open(token_file, 'w') as token:
@@ -396,6 +402,152 @@ Interval: 5 seconds
         except Exception as e:
             self.logger.error(f"Failed to list recent videos: {e}")
             return []
+    
+    def get_token_expiry_info(self) -> Optional[dict]:
+        """
+        Get information about current OAuth token expiry
+        
+        Returns:
+            Dictionary with token expiry information or None if no valid credentials
+        """
+        try:
+            token_file = self._get_token_file_path()
+            if not os.path.exists(token_file):
+                return None
+                
+            creds = Credentials.from_authorized_user_file(token_file, self.SCOPES)
+            
+            if not creds or not creds.expiry:
+                return None
+                
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            expiry = creds.expiry
+            
+            # Ensure both datetimes are timezone-aware for comparison
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+                
+            time_until_expiry = expiry - now
+            days_remaining = time_until_expiry.days
+            hours_remaining = time_until_expiry.seconds // 3600
+            
+            return {
+                'expiry_time': expiry,
+                'days_remaining': days_remaining,
+                'hours_remaining': hours_remaining,
+                'total_seconds_remaining': time_until_expiry.total_seconds(),
+                'is_expired': time_until_expiry.total_seconds() <= 0,
+                'needs_refresh': time_until_expiry.total_seconds() < 3600  # Less than 1 hour
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get token expiry info: {e}")
+            return None
+    
+    def refresh_token_proactively(self) -> bool:
+        """
+        Refresh OAuth token before it expires to prevent upload failures
+        
+        Returns:
+            True if token is valid (refreshed or still good), False if refresh failed
+        """
+        try:
+            token_info = self.get_token_expiry_info()
+            
+            if not token_info:
+                self.logger.warning("No OAuth token information available - may need re-authentication")
+                return False
+                
+            if token_info['is_expired']:
+                self.logger.warning("OAuth token is already expired - re-authentication required")
+                return False
+                
+            if not token_info['needs_refresh']:
+                days = token_info['days_remaining']
+                hours = token_info['hours_remaining']
+                self.logger.info(f"OAuth token is healthy - expires in {days} days, {hours} hours")
+                return True
+                
+            # Token needs refresh
+            self.logger.info("OAuth token expires soon, attempting proactive refresh...")
+            
+            token_file = self._get_token_file_path()
+            creds = Credentials.from_authorized_user_file(token_file, self.SCOPES)
+            
+            if creds and creds.refresh_token:
+                # Refresh the credentials (works for both expired and soon-to-expire tokens)
+                creds.refresh(Request())
+                
+                # Save refreshed credentials
+                with open(token_file, 'w') as token:
+                    token.write(creds.to_json())
+                    
+                self.logger.info("OAuth token refreshed successfully")
+                
+                # Update our service instance with new credentials
+                self.service = build('youtube', 'v3', credentials=creds)
+                self._authenticated = True
+                
+                return True
+            else:
+                self.logger.warning("Cannot refresh OAuth token - refresh_token not available")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to refresh OAuth token proactively: {e}")
+            return False
+    
+    def check_token_health_and_alert(self) -> bool:
+        """
+        Check OAuth token health and send email alerts if expiring soon
+        
+        Returns:
+            True if token is healthy, False if there are issues
+        """
+        try:
+            token_info = self.get_token_expiry_info()
+            
+            if not token_info:
+                self.logger.warning("No OAuth token information - authentication may be required")
+                return False
+                
+            if token_info['is_expired']:
+                self.logger.error("YouTube OAuth token is expired!")
+                # Send alert email about expired token
+                try:
+                    self.email_notifier.send_notification(
+                        "🚨 YouTube Token Expired",
+                        "The YouTube OAuth token has expired. Manual re-authentication required.",
+                        {"Status": "Expired", "Action Required": "Run: python main.py test --youtube"}
+                    )
+                except:
+                    pass  # Don't fail if email fails
+                return False
+                
+            days_remaining = token_info['days_remaining']
+            
+            # Send warning email if token expires in less than 7 days
+            if days_remaining < 7 and days_remaining > 0:
+                self.logger.warning(f"YouTube OAuth token expires in {days_remaining} days")
+                try:
+                    self.email_notifier.send_notification(
+                        "⚠️ YouTube Token Expiring Soon",
+                        f"YouTube OAuth token will expire in {days_remaining} days. System will attempt automatic refresh.",
+                        {
+                            "Days Remaining": str(days_remaining),
+                            "Expiry Date": token_info['expiry_time'].strftime('%Y-%m-%d %H:%M UTC'),
+                            "Action": "Monitor for successful refresh or re-authenticate if needed"
+                        }
+                    )
+                except:
+                    pass  # Don't fail if email fails
+                    
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to check OAuth token health: {e}")
+            return False
             
     def test_authentication(self) -> bool:
         """
@@ -419,8 +571,16 @@ Interval: 5 seconds
             channel_name = channel_info['snippet']['title']
             subscriber_count = channel_info['statistics'].get('subscriberCount', 'Unknown')
             
+            self.logger.info(f"Authentication: OAuth")
             self.logger.info(f"Channel: {channel_name}")
             self.logger.info(f"Subscribers: {subscriber_count}")
+            
+            # Show token health info
+            token_info = self.get_token_expiry_info()
+            if token_info:
+                days = token_info['days_remaining']
+                hours = token_info['hours_remaining']
+                self.logger.info(f"Token expires in {days} days, {hours} hours")
             
             # Test listing videos
             recent_videos = self.list_recent_videos(5)

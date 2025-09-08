@@ -27,6 +27,7 @@ except ImportError:
     ONVIFError = Exception
 
 from config_manager import get_config
+from sunset_brilliance_score import SunsetBrillianceScore, FrameMetrics
 
 
 class CameraInterface:
@@ -55,6 +56,11 @@ class CameraInterface:
         except ValueError as e:
             self.logger.error(f"Failed to get camera credentials: {e}")
             raise
+            
+        # Initialize SBS analyzer for real-time processing
+        self.sbs_analyzer = SunsetBrillianceScore()
+        self.current_chunk_metrics = []
+        self.current_chunk_number = 0
             
         self.logger.info(f"Camera interface initialized for {self.ip}")
         
@@ -277,8 +283,8 @@ class CameraInterface:
                 final_video_path = chunk_videos[0]
             
             if final_video_path and final_video_path.exists():
-                # Extract frames from the final concatenated video
-                captured_images = self.extract_frames_from_video(
+                # Extract frames from the final concatenated video with SBS analysis
+                captured_images = self.extract_frames_from_video_with_sbs(
                     final_video_path, start_time, interval_seconds
                 )
                 
@@ -448,6 +454,160 @@ class CameraInterface:
         except Exception as e:
             self.logger.error(f"Failed to extract frames: {e}")
             return extracted_frames
+    
+    def extract_frames_from_video_with_sbs(self, video_path: Path, start_time: datetime, 
+                                          interval_seconds: int) -> List[Path]:
+        """
+        Extract frames from video with real-time SBS analysis
+        Pi-optimized: processes each frame as it's extracted
+        
+        Args:
+            video_path: Path to video file
+            start_time: Base time for frame naming and SBS timing
+            interval_seconds: Seconds between frames
+            
+        Returns:
+            List of extracted frame paths
+        """
+        import subprocess
+        from datetime import timedelta
+        
+        extracted_frames = []
+        self.sbs_analyzer.reset_performance_stats()
+        self.current_chunk_metrics = []
+        
+        try:
+            # Get video duration
+            probe_cmd = [
+                'ffprobe', '-v', 'quiet',
+                '-show_entries', 'format=duration',
+                '-of', 'csv=p=0',
+                str(video_path)
+            ]
+            
+            result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                self.logger.error("Failed to probe video duration")
+                return extracted_frames
+                
+            duration = float(result.stdout.strip())
+            frame_count = int(duration / interval_seconds)
+            chunk_duration_minutes = 15 * 60  # 15 minutes in seconds
+            
+            self.logger.info(f"Extracting {frame_count} frames with SBS analysis at {interval_seconds}s intervals")
+            
+            # Create date folder
+            paths = self.config.get_storage_paths()
+            date_folder = paths['images'] / start_time.strftime('%Y-%m-%d')
+            date_folder.mkdir(exist_ok=True)
+            
+            # Extract frames with real-time SBS analysis
+            for i in range(frame_count):
+                timestamp_offset = i * interval_seconds
+                frame_time = start_time + timedelta(seconds=timestamp_offset)
+                
+                # Generate filename
+                timestamp_str = frame_time.strftime('%Y%m%d_%H%M%S')
+                frame_path = date_folder / f"img_{timestamp_str}.jpg"
+                
+                # Extract frame at specific time
+                extract_cmd = [
+                    'ffmpeg', '-y',
+                    '-ss', str(timestamp_offset),
+                    '-i', str(video_path),
+                    '-vframes', '1',
+                    '-q:v', '2',  # High quality
+                    str(frame_path)
+                ]
+                
+                result = subprocess.run(extract_cmd, capture_output=True, text=True)
+                
+                if result.returncode == 0 and frame_path.exists():
+                    extracted_frames.append(frame_path)
+                    
+                    # Perform real-time SBS analysis on extracted frame
+                    self._analyze_frame_sbs(frame_path, i, timestamp_offset)
+                    
+                    # Check if we need to complete a chunk analysis
+                    if timestamp_offset > 0 and timestamp_offset % chunk_duration_minutes == 0:
+                        self._complete_chunk_analysis(start_time, timestamp_offset)
+                    
+                    self.logger.debug(f"Extracted and analyzed frame {i+1}/{frame_count}: {frame_path.name}")
+                else:
+                    self.logger.warning(f"Failed to extract frame at {timestamp_offset}s")
+                    
+            # Complete final chunk if there are remaining metrics
+            if self.current_chunk_metrics:
+                final_offset = frame_count * interval_seconds
+                self._complete_chunk_analysis(start_time, final_offset)
+            
+            # Log SBS performance stats
+            perf_stats = self.sbs_analyzer.get_performance_stats()
+            if perf_stats.get('status') != 'no_data':
+                self.logger.info(f"SBS Analysis Performance: {perf_stats['avg_processing_time_ms']:.1f}ms avg, "
+                               f"{perf_stats['frames_processed']} frames, "
+                               f"Status: {perf_stats['pi_performance_status']}")
+                    
+            return extracted_frames
+            
+        except Exception as e:
+            self.logger.error(f"Failed to extract frames with SBS: {e}")
+            return extracted_frames
+    
+    def _analyze_frame_sbs(self, frame_path: Path, frame_number: int, timestamp_offset: float):
+        """Analyze single frame for SBS metrics"""
+        try:
+            # Load frame
+            frame = cv2.imread(str(frame_path))
+            if frame is None:
+                self.logger.warning(f"Could not load frame for SBS analysis: {frame_path}")
+                return
+                
+            # Perform SBS analysis
+            frame_metrics = self.sbs_analyzer.analyze_frame(
+                frame, frame_number, timestamp_offset
+            )
+            
+            if frame_metrics:
+                self.current_chunk_metrics.append(frame_metrics)
+                
+        except Exception as e:
+            self.logger.error(f"SBS frame analysis failed: {e}")
+    
+    def _complete_chunk_analysis(self, start_time: datetime, current_offset: float):
+        """Complete analysis for a 15-minute chunk"""
+        if not self.current_chunk_metrics:
+            return
+            
+        try:
+            # Calculate sunset offset for golden hour bonus
+            from sunset_calculator import SunsetCalculator
+            sunset_calc = SunsetCalculator()
+            sunset_time = sunset_calc.get_sunset_time(start_time.date())
+            chunk_time = start_time + timedelta(seconds=current_offset - (15 * 60))  # Middle of chunk
+            sunset_offset_minutes = (chunk_time - sunset_time).total_seconds() / 60
+            
+            # Analyze chunk
+            chunk_metrics = self.sbs_analyzer.analyze_chunk(
+                self.current_chunk_metrics, 
+                self.current_chunk_number, 
+                sunset_offset_minutes
+            )
+            
+            # Save chunk analysis
+            date_str = start_time.strftime('%Y-%m-%d')
+            self.sbs_analyzer.save_chunk_analysis(chunk_metrics, date_str)
+            
+            self.logger.info(f"Completed SBS analysis for chunk {self.current_chunk_number}: "
+                           f"Score {chunk_metrics.brilliance_score:.1f}, "
+                           f"{len(self.current_chunk_metrics)} frames")
+            
+            # Reset for next chunk
+            self.current_chunk_metrics = []
+            self.current_chunk_number += 1
+            
+        except Exception as e:
+            self.logger.error(f"Chunk SBS analysis failed: {e}")
         
     def capture_sequence(self, start_time: datetime, end_time: datetime, 
                         interval_seconds: int) -> List[Path]:

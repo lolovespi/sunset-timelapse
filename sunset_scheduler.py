@@ -9,7 +9,7 @@ import signal
 import sys
 from datetime import datetime, date, timedelta
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 import schedule
 import threading
 import json
@@ -20,6 +20,7 @@ from camera_interface import CameraInterface
 from video_processor import VideoProcessor
 from youtube_uploader import YouTubeUploader
 from email_notifier import EmailNotifier
+from sbs_reporter import SBSReporter
 
 
 class SunsetScheduler:
@@ -36,6 +37,7 @@ class SunsetScheduler:
         self.video_processor = VideoProcessor()
         self.youtube_uploader = YouTubeUploader()
         self.email_notifier = EmailNotifier()
+        self.sbs_reporter = SBSReporter()
         
         # State tracking
         self.running = False
@@ -250,7 +252,96 @@ class SunsetScheduler:
         except Exception as e:
             self.logger.error(f"Failed to upload video: {e}")
             return False
+    
+    def upload_to_youtube_with_sbs(self, video_path: Path, target_date: date, 
+                                  sbs_report: Optional[Dict] = None, 
+                                  actual_start_time: datetime = None, 
+                                  actual_end_time: datetime = None, 
+                                  is_test: bool = False) -> bool:
+        """
+        Upload video to YouTube with SBS-enhanced title and description
+        
+        Args:
+            video_path: Path to video file
+            target_date: Date the video was captured
+            sbs_report: SBS analysis report (optional)
+            actual_start_time: Actual start time of capture (optional)
+            actual_end_time: Actual end time of capture (optional)  
+            is_test: If True, use test video title and description
             
+        Returns:
+            True if upload successful, False otherwise
+        """
+        try:
+            # Use actual capture times if provided, otherwise use calculated sunset window
+            if actual_start_time and actual_end_time:
+                start_time, end_time = actual_start_time, actual_end_time
+            else:
+                start_time, end_time = self.sunset_calc.get_capture_window(target_date)
+            
+            # Get SBS enhancements if report available
+            title_enhancement = ""
+            description_enhancement = ""
+            
+            if sbs_report:
+                title_enhancement = self.sbs_reporter.get_video_title_enhancement(target_date)
+                description_enhancement = self.sbs_reporter.get_video_description_enhancement(target_date)
+            
+            # Upload video with enhancements
+            video_id = self.youtube_uploader.upload_video_with_sbs_enhancements(
+                video_path, target_date, start_time, end_time, 
+                title_enhancement, description_enhancement, is_test
+            )
+            
+            if video_id:
+                self.logger.info(f"Video uploaded to YouTube with SBS enhancements: {video_id}")
+                if sbs_report:
+                    score = sbs_report['summary']['daily_brilliance_score']
+                    grade = sbs_report['summary']['quality_grade']
+                    self.logger.info(f"SBS-enhanced upload: Score {score:.1f} (Grade {grade})")
+                return True
+            else:
+                self.logger.error("Failed to upload video to YouTube")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to upload video with SBS enhancements: {e}")
+            # Fallback to regular upload
+            self.logger.info("Attempting fallback upload without SBS enhancements")
+            return self.upload_to_youtube(video_path, target_date, actual_start_time, actual_end_time, is_test)
+            
+    def daily_maintenance(self):
+        """Perform daily maintenance tasks including token refresh and file cleanup"""
+        self.logger.info("Starting daily maintenance tasks...")
+        
+        try:
+            # Task 1: Check and refresh YouTube token proactively
+            self.logger.info("Checking YouTube token health...")
+            token_healthy = self.youtube_uploader.check_token_health_and_alert()
+            
+            if token_healthy:
+                # Try to refresh token if it needs it
+                refresh_success = self.youtube_uploader.refresh_token_proactively()
+                if refresh_success:
+                    self.logger.info("✓ YouTube token is healthy and refreshed")
+                else:
+                    self.logger.warning("⚠ YouTube token refresh failed - manual intervention may be needed")
+            else:
+                self.logger.error("✗ YouTube token has issues - check logs and email notifications")
+            
+            # Task 2: Clean up old SBS analysis data
+            self.logger.info("Cleaning up old SBS analysis data...")
+            sbs_retention_days = self.config.get('sbs.retention_days', 30)
+            self.sbs_reporter.cleanup_old_sbs_data(sbs_retention_days)
+            
+            # Task 3: Clean up old files
+            self.cleanup_old_files()
+            
+            self.logger.info("Daily maintenance completed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error during daily maintenance: {e}")
+    
     def cleanup_old_files(self):
         """Clean up old files based on configuration"""
         self.logger.info("Starting cleanup of old files...")
@@ -326,19 +417,29 @@ class SunsetScheduler:
                 # Email notification already sent in process_captured_images
                 return False
                 
-            # Step 3: Upload to YouTube
-            upload_success = self.upload_to_youtube(video_path, target_date)
+            # Step 3: Generate SBS report and enhance video metadata
+            sbs_report = self.sbs_reporter.generate_daily_report(target_date)
+            if sbs_report:
+                self.logger.info(f"SBS Analysis completed: Score {sbs_report['summary']['daily_brilliance_score']:.1f} "
+                               f"(Grade {sbs_report['summary']['quality_grade']})")
+            
+            # Step 4: Upload to YouTube with SBS enhancements
+            upload_success = self.upload_to_youtube_with_sbs(video_path, target_date, sbs_report)
             if not upload_success:
                 self.logger.warning("YouTube upload failed, but workflow will continue")
-                # Send email notification for YouTube upload failure
+                # Send email notification for YouTube upload failure (with SBS data)
+                failure_msg = "YouTube upload failed"
+                if sbs_report:
+                    failure_msg += f" (SBS Score: {sbs_report['summary']['daily_brilliance_score']:.1f})"
+                
                 self.email_notifier.send_processing_failure(
-                    "YouTube upload failed", 
+                    failure_msg, 
                     target_date, 
                     "youtube_upload"
                 )
                 
-            # Step 4: Cleanup old files
-            self.cleanup_old_files()
+            # Step 5: Daily maintenance (includes token refresh, SBS cleanup, and file cleanup)
+            self.daily_maintenance()
             
             self.logger.info(f"Daily workflow completed for {target_date}")
             return True
@@ -367,7 +468,10 @@ class SunsetScheduler:
         # Schedule the job
         schedule.every().day.at(schedule_time_str).do(self.complete_daily_workflow)
         
-        # Also schedule a weekly cleanup
+        # Schedule daily maintenance at 6 AM (includes token refresh and cleanup)
+        schedule.every().day.at("06:00").do(self.daily_maintenance)
+        
+        # Also schedule a backup weekly cleanup (in case daily maintenance fails)
         schedule.every().sunday.at("02:00").do(self.cleanup_old_files)
         
     def run_scheduler(self):
