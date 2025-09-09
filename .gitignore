@@ -5,11 +5,23 @@
 !requirements.json
 !example-config.yaml
 config.yaml
-config-pi.yaml
+config-*.yaml
 *token*
 *credentials*
 *secret*
 BLOG_POST.md
+
+# Temporary analysis and test files
+analyze_*.py
+create_*.py  
+explain_*.py
+debug_*.py
+test_*.py
+calibrate_*.py
+verify_*.py
+manual_*.py
+*_v2*.py
+sbs_v*.py
 
 # Python
 __pycache__/
@@ -30,15 +42,22 @@ data/
 *.png
 *.log
 
-# IDE
+# IDE and Claude Code
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
 
 # Deployment scripts
 deploy.sh

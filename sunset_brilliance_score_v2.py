@@ -255,9 +255,9 @@ class SunsetBrillianceScoreV2:
         # Apply penalties
         final_score = base_score * coverage_penalty * saturation_penalty
         
-        # HUMAN-CALIBRATED: Scale to realistic range
-        # Sept 1st should score ~15-25, not 85-100
-        realistic_score = final_score * 0.3  # Conservative scaling factor
+        # HUMAN-CALIBRATED: Scale to realistic range (AGGRESSIVE v2.2)
+        # Sept 1st should score ~5-15, Sept 8th should score ~20-40, not 85-100
+        realistic_score = final_score * 0.10  # Aggressive scaling factor (90% reduction)
         
         return float(np.clip(realistic_score, 0, 100))
     
