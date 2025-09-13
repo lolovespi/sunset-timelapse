@@ -238,12 +238,12 @@ Top Recommendations:
             
             enhancement = f"""
 
-🌅 Sunset Brilliance Analysis:
-Quality Score: {score:.1f}/100 (Grade {grade})
+🌅 Sunset Analysis:
+Quality Grade: {grade}
 Peak Moments: Minutes {peak_time_start:02d}:00 - {peak_time_end:02d}:00
-Captured with AI-powered quality analysis
+Captured with AI-powered sunset analysis
 
-#SunsetBrilliance #AIAnalyzed #QualityGrade{grade}"""
+#SunsetAnalysis #QualityGrade{grade}"""
             
             return enhancement
             

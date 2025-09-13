@@ -19,6 +19,7 @@ from sunset_calculator import SunsetCalculator
 from camera_interface import CameraInterface
 from video_processor import VideoProcessor
 from youtube_uploader import YouTubeUploader
+from drive_uploader import DriveUploader
 from email_notifier import EmailNotifier
 from sbs_reporter import SBSReporter
 
@@ -36,6 +37,7 @@ class SunsetScheduler:
         self.camera = CameraInterface()
         self.video_processor = VideoProcessor()
         self.youtube_uploader = YouTubeUploader()
+        self.drive_uploader = DriveUploader()
         self.email_notifier = EmailNotifier()
         self.sbs_reporter = SBSReporter()
         
@@ -113,6 +115,22 @@ class SunsetScheduler:
                 validation_results.append(True)  # Non-critical failure
         except Exception as e:
             self.logger.warning(f"⚠ YouTube uploader error: {e} (uploads will be skipped)")
+            validation_results.append(True)  # Non-critical failure
+            
+        # Validate Drive uploader (optional)
+        try:
+            drive_enabled = self.config.get('drive.enabled', False)
+            if drive_enabled:
+                if self.drive_uploader.test_authentication():
+                    self.logger.info("✓ Google Drive uploader validation passed")
+                    validation_results.append(True)
+                else:
+                    self.logger.warning("⚠ Google Drive uploader validation failed (cloud storage will be skipped)")
+                    validation_results.append(True)  # Non-critical failure
+            else:
+                self.logger.info("○ Google Drive uploader disabled in config")
+        except Exception as e:
+            self.logger.warning(f"⚠ Google Drive uploader error: {e} (cloud storage will be skipped)")
             validation_results.append(True)  # Non-critical failure
             
         success = all(validation_results)
@@ -334,7 +352,17 @@ class SunsetScheduler:
             sbs_retention_days = self.config.get('sbs.retention_days', 30)
             self.sbs_reporter.cleanup_old_sbs_data(sbs_retention_days)
             
-            # Task 3: Clean up old files
+            # Task 3: Clean up old Google Drive files
+            drive_enabled = self.config.get('drive.enabled', False)
+            if drive_enabled:
+                self.logger.info("Cleaning up old Google Drive files...")
+                try:
+                    deleted_count = self.drive_uploader.cleanup_old_files()
+                    self.logger.info(f"Cleaned up {deleted_count} old files from Google Drive")
+                except Exception as e:
+                    self.logger.warning(f"Drive cleanup failed: {e}")
+            
+            # Task 4: Clean up local old files
             self.cleanup_old_files()
             
             self.logger.info("Daily maintenance completed successfully")
@@ -423,7 +451,34 @@ class SunsetScheduler:
                 self.logger.info(f"SBS Analysis completed: Score {sbs_report['summary']['daily_brilliance_score']:.1f} "
                                f"(Grade {sbs_report['summary']['quality_grade']})")
             
-            # Step 4: Upload to YouTube with SBS enhancements
+            # Step 4: Upload to Google Drive (for Claude bot processing)
+            drive_enabled = self.config.get('drive.enabled', False)
+            if drive_enabled:
+                try:
+                    sunset_start, sunset_end = self.sunset_calc.get_capture_window(target_date)
+                    drive_metadata = {
+                        'sunset_start': sunset_start.isoformat(),
+                        'sunset_end': sunset_end.isoformat(),
+                        'capture_date': target_date.isoformat()
+                    }
+                    
+                    # Add SBS data to metadata for Claude bot
+                    if sbs_report:
+                        drive_metadata.update({
+                            'sbs_score': sbs_report['summary']['daily_brilliance_score'],
+                            'sbs_grade': sbs_report['summary']['quality_grade'],
+                            'sbs_analysis': sbs_report['summary']
+                        })
+                    
+                    drive_result = self.drive_uploader.upload_video(video_path, target_date, drive_metadata)
+                    if drive_result:
+                        self.logger.info(f"Video uploaded to Google Drive: {drive_result['filename']}")
+                    else:
+                        self.logger.warning("Google Drive upload failed")
+                except Exception as e:
+                    self.logger.warning(f"Google Drive upload error: {e}")
+            
+            # Step 5: Upload to YouTube with SBS enhancements
             upload_success = self.upload_to_youtube_with_sbs(video_path, target_date, sbs_report)
             if not upload_success:
                 self.logger.warning("YouTube upload failed, but workflow will continue")

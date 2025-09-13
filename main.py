@@ -131,6 +131,16 @@ def cmd_test(args):
             logger.error("✗ YouTube test failed")
             sys.exit(1)
     
+    if args.drive:
+        logger.info("Testing Google Drive authentication...")
+        from drive_uploader import DriveUploader
+        drive_uploader = DriveUploader()
+        if drive_uploader.test_authentication():
+            logger.info("✓ Google Drive test passed")
+        else:
+            logger.error("✗ Google Drive test failed")
+            sys.exit(1)
+    
     if args.youtube_token:
         logger.info("Testing YouTube token management...")
         token_info = scheduler.youtube_uploader.get_token_expiry_info()
@@ -704,6 +714,8 @@ Examples:
                            help='Test YouTube authentication')
     test_parser.add_argument('--youtube-token', action='store_true',
                            help='Test YouTube token refresh and health check')
+    test_parser.add_argument('--drive', action='store_true',
+                           help='Test Google Drive authentication and upload')
     test_parser.add_argument('--recordings', action='store_true',
                            help='Test Reolink recording search and download')
     test_parser.add_argument('--sunset', action='store_true',
