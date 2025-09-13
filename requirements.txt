@@ -1,46 +1,47 @@
 # Core dependencies
-PyYAML>=6.0.1
-python-dotenv>=1.0.0
-requests>=2.31.0
-Pillow>=10.0.0
+PyYAML
+python-dotenv
+requests
+Pillow
 
 # Computer Vision and SBS Analysis (Pi-optimized)
-opencv-python-headless>=4.8.0  # Headless for Pi (smaller footprint)
-numpy>=1.24.0  # Required for SBS mathematical operations
-scipy>=1.10.0  # Statistical calculations for SBS metrics
+opencv-python-headless  # Headless for Pi (smaller footprint)
+numpy  # Required for SBS mathematical operations
+scipy  # Statistical calculations for SBS metrics
 
 # Astronomy calculations
-astral>=3.2
-# Note: Using zoneinfo from standard library (Python 3.9+) instead of deprecated pytz
+astral
 
 # ONVIF camera control
-onvif-zeep>=0.2.12
-zeep>=4.2.1
+onvif-zeep
+zeep
 
 # Reolink camera API
-git+https://github.com/ReolinkCameraAPI/reolinkapipy.git
+# Note: Install separately on Pi due to dependency conflicts:
+# pip install reolinkapi --force-reinstall --no-deps
+reolinkapi
 
 # Video processing
-ffmpeg-python>=0.2.0
+ffmpeg-python
 
 # YouTube API
-google-auth>=2.23.0
-google-auth-oauthlib>=1.1.0
-google-auth-httplib2>=0.1.1
-google-api-python-client>=2.100.0
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
 
 # Scheduling (for Raspberry Pi)
-schedule>=1.2.0
+schedule
 
 # Logging and utilities
-colorlog>=6.7.0
-tqdm>=4.66.0
+colorlog
+tqdm
 
 # Development/testing
-pytest>=7.4.0
-pytest-cov>=4.1.0
-black>=23.7.0
-flake8>=6.0.0
+pytest
+pytest-cov
+black
+flake8
 
 # Platform-specific (uncomment as needed)
 # RPi.GPIO>=0.7.1  # For Raspberry Pi GPIO access if needed
@@ -50,6 +51,9 @@ flake8>=6.0.0
 # sudo apt update && sudo apt install -y python3-opencv python3-numpy python3-scipy
 # Then install Python packages:
 # pip3 install -r requirements.txt
+# 
+# For dependency conflicts on Pi with reolinkapi, install separately:
+# pip install reolinkapi --force-reinstall --no-deps
 # 
 # SBS Performance Optimization for Pi:
 # - opencv-python-headless reduces memory usage vs full opencv-python
