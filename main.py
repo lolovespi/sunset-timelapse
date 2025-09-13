@@ -452,6 +452,67 @@ def cmd_cleanup(args):
     logger.info("Cleanup completed")
 
 
+def cmd_upload(args):
+    """Upload existing timelapse video to YouTube"""
+    setup_logging()
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from datetime import datetime
+        upload_date = datetime.strptime(args.upload_date, '%Y-%m-%d').date()
+    except ValueError:
+        logger.error("Invalid date format. Use YYYY-MM-DD")
+        return
+    
+    logger.info(f"Uploading timelapse video for {upload_date}")
+    
+    try:
+        from video_processor import VideoProcessor
+        from youtube_uploader import YouTubeUploader
+        from sunset_calculator import SunsetCalculator
+        
+        video_processor = VideoProcessor()
+        youtube_uploader = YouTubeUploader()
+        sunset_calc = SunsetCalculator()
+        
+        # Build expected video path for this date
+        from pathlib import Path
+        config = get_config()
+        storage_base = Path(config.get('storage.base_path')).expanduser()
+        videos_dir = storage_base / 'videos'
+        date_formatted = upload_date.strftime('%m/%d/%y').replace('/', '_')
+        video_filename = f"Sunset_{date_formatted}.mp4"
+        video_path = videos_dir / video_filename
+        
+        if not video_path.exists():
+            logger.error(f"No timelapse video found for {upload_date}")
+            logger.info(f"Expected location: {video_path}")
+            logger.info("Available videos:")
+            if videos_dir.exists():
+                for video_file in videos_dir.glob("*.mp4"):
+                    logger.info(f"  - {video_file.name}")
+            return
+            
+        logger.info(f"Found video: {video_path}")
+        
+        # Get sunset times for metadata
+        try:
+            sunset_start, sunset_end = sunset_calc.get_capture_window(upload_date)
+            logger.info(f"Sunset window: {sunset_start} to {sunset_end}")
+        except Exception as e:
+            logger.warning(f"Could not calculate sunset times: {e}")
+            sunset_start = sunset_end = None
+        
+        # Upload to YouTube
+        logger.info("Starting YouTube upload...")
+        youtube_uploader.upload_video(video_path, upload_date, sunset_start, sunset_end)
+        logger.info("✓ Upload completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        raise
+
+
 def cmd_config(args):
     """Configuration management"""
     setup_logging()
@@ -686,6 +747,12 @@ Examples:
     cleanup_parser.add_argument('--dry-run', action='store_true',
                               help='Show what would be deleted without actually deleting')
     cleanup_parser.set_defaults(func=cmd_cleanup)
+    
+    # Upload command
+    upload_parser = subparsers.add_parser('upload', help='Upload existing timelapse video to YouTube')
+    upload_parser.add_argument('--date', dest='upload_date', required=True,
+                             help='Date of video to upload (YYYY-MM-DD)')
+    upload_parser.set_defaults(func=cmd_upload)
     
     # SBS command (Sunset Brilliance Score analysis and reports)
     sbs_parser = subparsers.add_parser('sbs', help='Sunset Brilliance Score analysis and reports')

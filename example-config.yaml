@@ -1,35 +1,21 @@
-# =============================================================================
-# SUNSET TIMELAPSE CONFIGURATION
-# =============================================================================
-# Copy this file to config.yaml and customize for your location and setup
-# All sensitive data should be in .env file (see .env.example)
-#
-# SETUP CHECKLIST:
-# [ ] 1. Copy this file to config.yaml
-# [ ] 2. Update location settings with your exact coordinates
-# [ ] 3. Update camera IP address and credentials
-# [ ] 4. Update YouTube channel settings
-# [ ] 5. Update storage paths for your system
-# [ ] 6. Create .env file from .env.example with your secrets
-# [ ] 7. Test with: python main.py test --camera --youtube --sunset
-
-# Location settings - CUSTOMIZE FOR YOUR LOCATION
+# Sunset Timelapse Configuration
+# Location settings
 location:
-  city: "Your City"          # Change to your city name
-  state: "Your State"        # Change to your state/province
-  country: "USA"             # Change to your country
-  latitude: 33.5186          # REQUIRED: Your exact latitude (decimal degrees)
-  longitude: -86.8104        # REQUIRED: Your exact longitude (decimal degrees)
-  timezone: "America/Chicago" # REQUIRED: Your timezone (use: python -c "import zoneinfo; print(zoneinfo.available_timezones())")
+  city: "Birmingham"
+  state: "AL"
+  country: "USA"
+  latitude: 33.5186
+  longitude: -86.8104
+  timezone: "America/Chicago"
 
-# Camera settings - CUSTOMIZE FOR YOUR CAMERA
+# Camera settings
 camera:
-  ip: "192.168.1.100"        # REQUIRED: Your camera's IP address
-  username: "admin"          # REQUIRED: Camera username (recommend creating read-only user)
-  # SECURITY: Password must be set in .env file as CAMERA_PASSWORD
-  onvif_port: 8000          # ONVIF port (legacy, not currently used)
-  rtsp_port: 554            # RTSP port for video streaming
-  model: "RLC810-WA"        # Your camera model (for documentation)
+  ip: "192.168.6.44" # Change to your camera's IP address
+  username: "admin" #recommend adding a separate user to read only camera access 
+  # Password should be set via environment variable CAMERA_PASSWORD. Ensure that permissions changed to 600
+  onvif_port: 8000 #no longer used. onvif doesn't work consistently
+  rtsp_port: 554
+  model: "RLC810-WA"
 
 # Capture settings
 capture:
@@ -60,21 +46,22 @@ storage:
   keep_images_days: 7  # Delete source images after N days
   keep_videos_locally_days: 1  # Delete local videos after upload and N days
 
-# YouTube settings - CUSTOMIZE FOR YOUR CHANNEL
+# YouTube settings
 youtube:
-  # SECURITY: GOOGLE_APPLICATION_CREDENTIALS must be set in .env file
-  channel_name: "Your Channel Name" # REQUIRED: Your actual YouTube channel name
-  video_title_format: "Sunset {date}"  # Video title format ({date} = MM/DD/YY)
+  # All sensitive data via environment variables
+  # GOOGLE_APPLICATION_CREDENTIALS should point to service account JSON
+  channel_name: "Your Channel Name" # Change to your actual YouTube channel name
+  video_title_format: "Sunset {date}"  # {date} will be replaced with MM/DD/YY 
   description_template: |
-    Daily sunset timelapse from Your City, Your State
+    Daily sunset timelapse from <LOCATION>
     Captured on {date} from {start_time} to {end_time}
     
-    Camera: Your Camera Model
+    Camera: Reolink RLC810-WA
     Interval: 5 seconds
     
-    #sunset #timelapse #yourcity #yourstate #automated
-  privacy_status: "public"  # Options: public, private, unlisted
-  category_id: 22  # YouTube category ID (22 = People & Blogs)
+    #sunset #timelapse #alabama #pelham
+  privacy_status: "public"  # public, private, unlisted
+  category_id: 22  # People & Blogs
 
 # Email notification settings
 email:
@@ -99,16 +86,6 @@ logging:
   backup_count: 5
   console_output: true
 
-# Sunset Brilliance Score (SBS) settings
-sbs:
-  enabled: true  # Enable real-time SBS analysis during capture
-  analysis_resize_height: 240  # Resize frames to this height for Pi optimization (0 = no resize)
-  sky_region_ratio: 0.6  # Top 60% of frame considered sky
-  golden_hour_minutes: 30  # ±30 minutes from sunset for golden hour bonus
-  save_frame_metrics: true  # Save detailed per-frame metrics
-  save_chunk_summaries: true  # Save 15-minute chunk summaries
-  performance_logging: true  # Log SBS processing performance stats
-
 # Advanced settings
 advanced:
   max_retries: 3
@@ -116,4 +93,21 @@ advanced:
   connection_timeout_seconds: 30
   ffmpeg_threads: 4
   cleanup_on_error: true
-  video_chunk_duration_minutes: 15  # Break long recordings into chunks for reliability
+
+sbs:
+  enabled: true
+     analysis_resize_height: 80  # Performance fix
+
+  # Sky region boundaries (currently using code defaults)
+  horizon_region_ratio: 0.8      # Focus on lower 80% for sunset glow
+  zenith_region_ratio: 0.3       # Top 30% for sky analysis
+  foreground_exclude_ratio: 0.2  # Exclude bottom 20% (buildings/trees)
+
+  # Human calibration
+  human_calibration_factor: 0.10  # 90% score reduction
+
+  sky_region_ratio: 0.6  # Legacy v1 compatibility
+  golden_hour_minutes: 30
+  save_frame_metrics: true
+  save_chunk_summaries: true
+  performance_logging: true
