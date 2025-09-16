@@ -43,9 +43,24 @@ class ConfigManager:
                 
             with open(self.config_path, 'r') as file:
                 self.config = yaml.safe_load(file)
+                # Expand environment variables in config values
+                self.config = self._expand_env_vars(self.config)
                 
         except Exception as e:
             raise Exception(f"Failed to load configuration: {e}")
+    
+    def _expand_env_vars(self, obj):
+        """Recursively expand environment variables in config values"""
+        import re
+        import os
+        
+        if isinstance(obj, str):
+            return re.sub(r'\$\{([^}]+)\}', lambda m: os.getenv(m.group(1), ''), obj)
+        elif isinstance(obj, dict):
+            return {k: self._expand_env_vars(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._expand_env_vars(item) for item in obj]
+        return obj
             
     def _validate_config(self):
         """Validate required configuration sections exist"""
