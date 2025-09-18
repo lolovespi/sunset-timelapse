@@ -5,6 +5,7 @@ Handles uploading timelapse videos to YouTube using Google API
 
 import logging
 import os
+import time
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -312,6 +313,124 @@ Interval: 5 seconds
                 
         except Exception as e:
             self.logger.error(f"Failed to upload video: {e}")
+            return None
+    
+    def upload_video_with_sbs_enhancements(self, video_path: Path, video_date: date,
+                                         start_time: datetime, end_time: datetime,
+                                         title_enhancement: str = "", description_enhancement: str = "",
+                                         is_test: bool = False) -> Optional[str]:
+        """
+        Upload video to YouTube with SBS enhancements to title and description
+        
+        Args:
+            video_path: Path to video file
+            video_date: Date the video was captured
+            start_time: Capture start time
+            end_time: Capture end time
+            title_enhancement: SBS-based title enhancement (e.g., " ✨ SPECTACULAR")
+            description_enhancement: SBS-based description enhancement
+            is_test: If True, use test title format
+            
+        Returns:
+            YouTube video ID if successful, None otherwise
+        """
+        if not self.is_authenticated():
+            self.logger.info("Not authenticated, attempting to authenticate...")
+            if not self.authenticate():
+                self.logger.error("Failed to authenticate with YouTube")
+                return None
+            
+        if not video_path.exists():
+            self.logger.error(f"Video file not found: {video_path}")
+            return None
+            
+        try:
+            # Format metadata with SBS enhancements
+            metadata = self.format_video_metadata(video_date, start_time, end_time, is_test)
+            
+            # Add SBS enhancements
+            if title_enhancement:
+                metadata['snippet']['title'] += title_enhancement
+                
+            if description_enhancement:
+                metadata['snippet']['description'] += description_enhancement
+            
+            self.logger.info(f"Uploading video to YouTube with SBS enhancements: {metadata['snippet']['title']}")
+            self.logger.info(f"File: {video_path} ({video_path.stat().st_size / 1024 / 1024:.1f} MB)")
+            
+            # Create media upload object
+            media = MediaFileUpload(
+                str(video_path),
+                chunksize=-1,  # Upload in a single request
+                resumable=True
+            )
+            
+            # Create upload request
+            request = self.service.videos().insert(
+                part=','.join(metadata.keys()),
+                body=metadata,
+                media_body=media
+            )
+            
+            # Execute upload with progress tracking
+            response = None
+            error = None
+            retry = 0
+            
+            while response is None and retry < 3:
+                try:
+                    status, response = request.next_chunk()
+                    if response is not None:
+                        if 'id' in response:
+                            video_id = response['id']
+                            video_url = f"https://www.youtube.com/watch?v={video_id}"
+                            
+                            self.logger.info(f"YouTube upload successful: {video_id}")
+                            self.logger.info(f"Video URL: {video_url}")
+                            
+                            # Send success notification
+                            stats = {
+                                "Video ID": video_id,
+                                "Title": metadata['snippet']['title'],
+                                "Duration": f"{(end_time - start_time).total_seconds() / 60:.1f} minutes",
+                                "File Size": f"{video_path.stat().st_size / 1024 / 1024:.1f} MB",
+                                "Upload Time": datetime.now().strftime('%I:%M %p')
+                            }
+                            
+                            self.email_notifier.send_upload_success(
+                                metadata['snippet']['title'],
+                                video_url,
+                                datetime.combine(video_date, datetime.min.time()),
+                                stats
+                            )
+                            
+                            return video_id
+                        else:
+                            self.logger.error(f"Upload failed with response: {response}")
+                            return None
+                            
+                except HttpError as e:
+                    if e.resp.status in [500, 502, 503, 504]:
+                        self.logger.warning(f"Retriable error occurred: {e}. Retrying in 5 seconds...")
+                        time.sleep(5)
+                        retry += 1
+                    else:
+                        self.logger.error(f"Non-retriable error occurred: {e}")
+                        return None
+                        
+                except Exception as e:
+                    self.logger.error(f"Upload error: {e}")
+                    retry += 1
+                    if retry < 3:
+                        self.logger.info("Retrying upload...")
+                        time.sleep(5)
+                
+            if response is None:
+                self.logger.error("Upload failed after all retry attempts")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to upload video with SBS enhancements: {e}")
             return None
             
     def get_channel_info(self) -> Optional[Dict[str, Any]]:
