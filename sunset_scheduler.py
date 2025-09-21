@@ -54,6 +54,12 @@ class SunsetScheduler:
         
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
+        if self.shutdown_requested:
+            # Force exit if already shutting down
+            self.logger.info("Force exit requested")
+            import sys
+            sys.exit(1)
+
         self.logger.info(f"Received signal {signum}, initiating graceful shutdown...")
         self.shutdown_requested = True
         self.stop()

@@ -298,6 +298,19 @@ Interval: 5 seconds
                     "Privacy Status": metadata['status']['privacyStatus'],
                     "Upload Time": datetime.now().strftime('%I:%M %p')
                 }
+
+                # Add token expiry information
+                try:
+                    token_info = self.get_token_expiry_info()
+                    if token_info and token_info['expiry_time']:
+                        expiry_str = token_info['expiry_time'].strftime('%Y-%m-%d %H:%M UTC')
+                        days_remaining = token_info['days_remaining']
+                        if days_remaining > 0:
+                            stats["YouTube Token Expires"] = f"{expiry_str} ({days_remaining} days)"
+                        else:
+                            stats["YouTube Token Expires"] = f"{expiry_str} (EXPIRED)"
+                except Exception:
+                    stats["YouTube Token Expires"] = "Unable to determine"
                 
                 self.email_notifier.send_upload_success(
                     metadata['snippet']['title'],
@@ -396,6 +409,19 @@ Interval: 5 seconds
                                 "File Size": f"{video_path.stat().st_size / 1024 / 1024:.1f} MB",
                                 "Upload Time": datetime.now().strftime('%I:%M %p')
                             }
+
+                            # Add token expiry information
+                            try:
+                                token_info = self.get_token_expiry_info()
+                                if token_info and token_info['expiry_time']:
+                                    expiry_str = token_info['expiry_time'].strftime('%Y-%m-%d %H:%M UTC')
+                                    days_remaining = token_info['days_remaining']
+                                    if days_remaining > 0:
+                                        stats["YouTube Token Expires"] = f"{expiry_str} ({days_remaining} days)"
+                                    else:
+                                        stats["YouTube Token Expires"] = f"{expiry_str} (EXPIRED)"
+                            except Exception:
+                                stats["YouTube Token Expires"] = "Unable to determine"
                             
                             self.email_notifier.send_upload_success(
                                 metadata['snippet']['title'],
@@ -632,13 +658,18 @@ Interval: 5 seconds
                 return False
                 
             if token_info['is_expired']:
-                self.logger.error("YouTube OAuth token is expired!")
+                expiry_date_str = token_info['expiry_time'].strftime('%Y-%m-%d %H:%M UTC')
+                self.logger.error(f"YouTube OAuth token is expired! (Expired on {expiry_date_str})")
                 # Send alert email about expired token
                 try:
                     self.email_notifier.send_notification(
-                        "🚨 YouTube Token Expired",
-                        "The YouTube OAuth token has expired. Manual re-authentication required.",
-                        {"Status": "Expired", "Action Required": "Run: python main.py test --youtube"}
+                        f"🚨 YouTube Token EXPIRED (since {expiry_date_str})",
+                        f"The YouTube OAuth token expired on {expiry_date_str}. Manual re-authentication required.",
+                        {
+                            "Status": "EXPIRED",
+                            "Expired On": expiry_date_str,
+                            "Action Required": "Run: ./sync_credentials.sh OR python main.py test --youtube"
+                        }
                     )
                 except:
                     pass  # Don't fail if email fails
@@ -646,16 +677,18 @@ Interval: 5 seconds
                 
             days_remaining = token_info['days_remaining']
             
-            # Send warning email if token expires in less than 7 days
-            if days_remaining < 7 and days_remaining > 0:
-                self.logger.warning(f"YouTube OAuth token expires in {days_remaining} days")
+            # Send warning email if token expires in less than 1 day (24 hours)
+            if days_remaining < 1 and days_remaining > 0:
+                expiry_date_str = token_info['expiry_time'].strftime('%Y-%m-%d %H:%M UTC')
+                self.logger.warning(f"YouTube OAuth token expires in {days_remaining} days on {expiry_date_str}")
                 try:
                     self.email_notifier.send_notification(
-                        "⚠️ YouTube Token Expiring Soon",
-                        f"YouTube OAuth token will expire in {days_remaining} days. System will attempt automatic refresh.",
+                        f"⚠️ YouTube Token Expires in {days_remaining} Days ({expiry_date_str})",
+                        f"YouTube OAuth token will expire in {days_remaining} days on {expiry_date_str}. System will attempt automatic refresh.",
                         {
                             "Days Remaining": str(days_remaining),
-                            "Expiry Date": token_info['expiry_time'].strftime('%Y-%m-%d %H:%M UTC'),
+                            "Expiry Date": expiry_date_str,
+                            "Current Status": "Warning - expires soon",
                             "Action": "Monitor for successful refresh or re-authenticate if needed"
                         }
                     )
