@@ -342,6 +342,19 @@ class CameraInterface:
             return chunk_paths[0]
         
         try:
+            # Check available disk space before concatenation
+            import shutil
+            available_space = shutil.disk_usage(tempfile.gettempdir()).free
+            total_chunk_size = sum(chunk.stat().st_size for chunk in chunk_paths if chunk.exists())
+
+            if available_space < total_chunk_size * 1.5:  # Need 1.5x space for safety
+                self.logger.error(f"Insufficient disk space: {available_space // (1024**3):.1f}GB available, "
+                                f"{total_chunk_size * 1.5 // (1024**3):.1f}GB needed for concatenation")
+                return None
+
+            self.logger.info(f"Concatenation space check: {available_space // (1024**3):.1f}GB available, "
+                           f"{total_chunk_size // (1024**3):.1f}GB input data")
+
             # Create temp file for concatenated video
             with tempfile.NamedTemporaryFile(suffix='_concatenated.mp4', delete=False) as temp_concat:
                 concat_path = Path(temp_concat.name)
@@ -364,7 +377,7 @@ class CameraInterface:
                 str(concat_path)
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # 30 minutes for large files
             
             # Clean up concat file list
             concat_file_path.unlink()
