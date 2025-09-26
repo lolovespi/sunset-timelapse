@@ -40,6 +40,7 @@ class YouTubeUploader:
         self.service = None
         self._authenticated = False
         self.email_notifier = EmailNotifier()
+        self._current_credentials = None
         
         if not GOOGLE_AVAILABLE:
             self.logger.error("Google API libraries not available. Install google-api-python-client")
@@ -99,7 +100,10 @@ class YouTubeUploader:
                 # Save credentials for next run
                 with open(token_file, 'w') as token:
                     token.write(creds.to_json())
-                    
+
+            # Store current credentials for expiry reporting
+            self._current_credentials = creds
+
             # Build YouTube service
             self.service = build('youtube', 'v3', credentials=creds)
             self._authenticated = True
@@ -301,14 +305,22 @@ Interval: 5 seconds
 
                 # Add token expiry information
                 try:
-                    token_info = self.get_token_expiry_info()
+                    token_info = self.get_token_expiry_info(use_active_credentials=True)
                     if token_info and token_info['expiry_time']:
                         expiry_str = token_info['expiry_time'].strftime('%Y-%m-%d %H:%M UTC')
-                        days_remaining = token_info['days_remaining']
-                        if days_remaining > 0:
-                            stats["YouTube Token Expires"] = f"{expiry_str} ({days_remaining} days)"
-                        else:
+                        days = token_info['days_remaining']
+                        hours = token_info['hours_remaining']
+                        total_seconds = token_info['total_seconds_remaining']
+
+                        if total_seconds <= 0:
                             stats["YouTube Token Expires"] = f"{expiry_str} (EXPIRED)"
+                        elif days > 0:
+                            stats["YouTube Token Expires"] = f"{expiry_str} ({days} days)"
+                        elif hours > 0:
+                            stats["YouTube Token Expires"] = f"{expiry_str} ({hours} hours)"
+                        else:
+                            minutes = int(total_seconds // 60)
+                            stats["YouTube Token Expires"] = f"{expiry_str} ({minutes} minutes)"
                 except Exception:
                     stats["YouTube Token Expires"] = "Unable to determine"
                 
@@ -412,14 +424,22 @@ Interval: 5 seconds
 
                             # Add token expiry information
                             try:
-                                token_info = self.get_token_expiry_info()
+                                token_info = self.get_token_expiry_info(use_active_credentials=True)
                                 if token_info and token_info['expiry_time']:
                                     expiry_str = token_info['expiry_time'].strftime('%Y-%m-%d %H:%M UTC')
-                                    days_remaining = token_info['days_remaining']
-                                    if days_remaining > 0:
-                                        stats["YouTube Token Expires"] = f"{expiry_str} ({days_remaining} days)"
-                                    else:
+                                    days = token_info['days_remaining']
+                                    hours = token_info['hours_remaining']
+                                    total_seconds = token_info['total_seconds_remaining']
+
+                                    if total_seconds <= 0:
                                         stats["YouTube Token Expires"] = f"{expiry_str} (EXPIRED)"
+                                    elif days > 0:
+                                        stats["YouTube Token Expires"] = f"{expiry_str} ({days} days)"
+                                    elif hours > 0:
+                                        stats["YouTube Token Expires"] = f"{expiry_str} ({hours} hours)"
+                                    else:
+                                        minutes = int(total_seconds // 60)
+                                        stats["YouTube Token Expires"] = f"{expiry_str} ({minutes} minutes)"
                             except Exception:
                                 stats["YouTube Token Expires"] = "Unable to determine"
                             
@@ -548,35 +568,49 @@ Interval: 5 seconds
             self.logger.error(f"Failed to list recent videos: {e}")
             return []
     
-    def get_token_expiry_info(self) -> Optional[dict]:
+    def get_token_expiry_info(self, use_active_credentials: bool = False) -> Optional[dict]:
         """
         Get information about current OAuth token expiry
-        
+
+        Args:
+            use_active_credentials: If True, use active service credentials instead of re-reading from disk
+
         Returns:
             Dictionary with token expiry information or None if no valid credentials
         """
         try:
-            token_file = self._get_token_file_path()
-            if not os.path.exists(token_file):
-                return None
-                
-            creds = Credentials.from_authorized_user_file(token_file, self.SCOPES)
-            
+            creds = None
+
+            # Try to use active credentials first if requested and available
+            if use_active_credentials and self._current_credentials:
+                creds = self._current_credentials
+
+            # Fall back to reading from token file
+            if not creds:
+                token_file = self._get_token_file_path()
+                if not os.path.exists(token_file):
+                    return None
+
+                creds = Credentials.from_authorized_user_file(token_file, self.SCOPES)
+
             if not creds or not creds.expiry:
                 return None
-                
+
             from datetime import timezone
             now = datetime.now(timezone.utc)
             expiry = creds.expiry
-            
+
             # Ensure both datetimes are timezone-aware for comparison
             if expiry.tzinfo is None:
                 expiry = expiry.replace(tzinfo=timezone.utc)
-                
+
             time_until_expiry = expiry - now
             days_remaining = time_until_expiry.days
-            hours_remaining = time_until_expiry.seconds // 3600
-            
+            # Calculate hours from total seconds, not just the seconds component
+            total_hours_remaining = int(time_until_expiry.total_seconds() // 3600)
+            hours_remaining = total_hours_remaining % 24  # Hours within the current day
+
+
             return {
                 'expiry_time': expiry,
                 'days_remaining': days_remaining,
@@ -585,7 +619,7 @@ Interval: 5 seconds
                 'is_expired': time_until_expiry.total_seconds() <= 0,
                 'needs_refresh': time_until_expiry.total_seconds() < 3600  # Less than 1 hour
             }
-            
+
         except Exception as e:
             self.logger.error(f"Failed to get token expiry info: {e}")
             return None
@@ -728,11 +762,19 @@ Interval: 5 seconds
             self.logger.info(f"Subscribers: {subscriber_count}")
             
             # Show token health info
-            token_info = self.get_token_expiry_info()
+            token_info = self.get_token_expiry_info(use_active_credentials=True)
             if token_info:
                 days = token_info['days_remaining']
                 hours = token_info['hours_remaining']
-                self.logger.info(f"Token expires in {days} days, {hours} hours")
+                total_seconds = token_info['total_seconds_remaining']
+
+                if days > 0 or hours > 0:
+                    self.logger.info(f"Token expires in {days} days, {hours} hours")
+                elif total_seconds > 0:
+                    minutes = int(total_seconds // 60)
+                    self.logger.info(f"Token expires in {minutes} minutes")
+                else:
+                    self.logger.info("Token has expired")
             
             # Test listing videos
             recent_videos = self.list_recent_videos(5)
