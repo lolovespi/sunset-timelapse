@@ -6,13 +6,18 @@ An automated system for capturing daily sunset timelapses using a Reolink camera
 
 - **Automated Daily Capture**: Calculates sunset times based on location and captures images 1 hour before/after sunset
 - **Smart Scheduling**: Uses astronomical calculations to determine optimal capture windows
+- **🌟 Sunset Brilliance Score (SBS)**: AI-powered analysis to automatically enhance exceptional sunsets with special titles
 - **Video Processing**: Creates high-quality timelapse videos from image sequences using FFmpeg
 - **YouTube Integration**: Automatically uploads videos with proper metadata and descriptions
+- **📧 Email Notifications**: Real-time alerts for uploads, errors, and system status
+- **☁️ Google Drive Backup**: Automatic cloud storage for videos and metadata
 - **Historical Retrieval**: Downloads and processes historical footage from camera storage
+- **🔐 Enhanced Token Management**: Automatic OAuth token refresh with health monitoring
 - **Multi-Platform**: Raspberry Pi for daily operations, MacBook for processing power
 - **Secure Configuration**: Environment-based secrets management
 - **ONVIF Support**: Camera control via standard ONVIF protocol
 - **Comprehensive Logging**: Detailed logs with rotation and health monitoring
+- **🚀 Easy Deployment**: Automated update scripts for Pi deployment
 
 ## 📋 Requirements
 
@@ -26,6 +31,9 @@ An automated system for capturing daily sunset timelapses using a Reolink camera
 - **Python 3.9+**
 - **FFmpeg** (for video processing)
 - **Google Cloud Project** (for YouTube API access)
+- **Email Account** (for notifications - Gmail recommended)
+- **OpenCV** (for advanced sunset analysis)
+- **NumPy & SciPy** (for mathematical computations)
 
 ### Supported Platforms
 - Linux (Raspberry Pi OS, Ubuntu)
@@ -129,6 +137,29 @@ storage:
   base_path: "/home/pi/sunset_timelapse"  # Change for Mac
   keep_images_days: 7
   keep_videos_locally_days: 1
+
+# Sunset Brilliance Score (SBS) settings
+sbs:
+  enabled: true
+  min_score_for_enhancement: 65
+  retention_days: 30
+  analysis_enabled: true
+
+# Email notification settings
+email:
+  enabled: true
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+  send_upload_notifications: true
+  send_error_notifications: true
+  send_daily_reports: false
+
+# Google Drive backup (optional)
+drive:
+  enabled: false
+  folder_name: "Sunset Timelapses"
+  upload_videos: true
+  upload_metadata: true
 ```
 
 ### Environment Variables (.env)
@@ -141,6 +172,16 @@ CAMERA_PASSWORD=your_camera_password
 
 # Google Cloud credentials path
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+
+# Email notification settings
+EMAIL_SMTP_SERVER=smtp.gmail.com
+EMAIL_SMTP_PORT=587
+EMAIL_USERNAME=your-email@gmail.com
+EMAIL_PASSWORD=your-app-password
+EMAIL_TO=recipient@example.com
+
+# Google Drive integration (optional)
+GOOGLE_DRIVE_FOLDER_ID=your_drive_folder_id
 ```
 
 ### Google Cloud Setup
@@ -209,6 +250,154 @@ python main.py config --validate --show
 python main.py test --camera      # Test camera connection
 python main.py test --youtube     # Test YouTube authentication
 python main.py test --sunset      # Show sunset schedule
+python main.py test --email       # Test email notifications
+python main.py test --drive       # Test Google Drive integration
+python main.py test --sbs         # Test SBS analysis system
+```
+
+## 🌟 Sunset Brilliance Score (SBS) System
+
+The SBS system uses advanced computer vision and machine learning to automatically analyze sunset quality and enhance exceptional captures with special titles.
+
+### How SBS Works
+
+1. **Image Analysis**: Analyzes sunset images for color intensity, cloud formations, and visual appeal
+2. **Score Calculation**: Assigns a brilliance score from 0-100 based on multiple factors
+3. **Automatic Enhancement**: Videos scoring above threshold get enhanced titles like "✨ SPECTACULAR"
+4. **Historical Tracking**: Maintains database of sunset quality over time
+
+### SBS Configuration
+
+```yaml
+sbs:
+  enabled: true
+  min_score_for_enhancement: 65  # Threshold for "spectacular" designation
+  retention_days: 30             # How long to keep analysis data
+  analysis_enabled: true         # Enable detailed analytics
+```
+
+### SBS Commands
+
+```bash
+# Test SBS analysis on recent sunset
+python main.py test --sbs
+
+# Analyze historical sunsets for patterns
+python analyze_historical_sbs.py --start 2024-01-01 --end 2024-12-31
+
+# Generate SBS analytics report
+python sbs_reporter.py --report --days 30
+```
+
+## 📧 Email Notification System
+
+Automated email notifications keep you informed about system status, successful uploads, and any issues.
+
+### Notification Types
+
+- **Upload Success**: Confirmation with video details and SBS score
+- **Upload Failures**: Immediate alerts with error details
+- **Token Expiration**: Warnings before YouTube token expires
+- **System Errors**: Critical system issues requiring attention
+- **Daily Reports**: Optional summary of daily operations
+
+### Email Setup
+
+1. **Enable App Password** (for Gmail):
+   - Go to Google Account settings
+   - Security → 2-Step Verification → App passwords
+   - Generate password for "Mail"
+
+2. **Configure Environment Variables**:
+   ```bash
+   EMAIL_SMTP_SERVER=smtp.gmail.com
+   EMAIL_SMTP_PORT=587
+   EMAIL_USERNAME=your-email@gmail.com
+   EMAIL_PASSWORD=your-16-digit-app-password
+   EMAIL_TO=recipient@example.com
+   ```
+
+3. **Test Email System**:
+   ```bash
+   python main.py test --email
+   ```
+
+## ☁️ Google Drive Integration
+
+Automatic backup of videos and metadata to Google Drive for redundancy and easy access.
+
+### Drive Setup
+
+1. **Create Drive Folder**: Create a dedicated folder in Google Drive
+2. **Get Folder ID**: Copy folder ID from URL
+3. **Configure**: Set `GOOGLE_DRIVE_FOLDER_ID` in `.env`
+4. **Enable**: Set `drive.enabled: true` in `config.yaml`
+
+### Drive Commands
+
+```bash
+# Test Drive integration
+python main.py test --drive
+
+# Manual backup of specific video
+python drive_uploader.py --video /path/to/video.mp4
+
+# Backup all videos from date range
+python drive_uploader.py --start 2024-01-01 --end 2024-01-07
+```
+
+## 🔐 Enhanced Token Management
+
+Improved YouTube OAuth token handling prevents authentication failures and reduces false alerts.
+
+### Token Features
+
+- **Proactive Refresh**: Automatically refreshes tokens before expiration
+- **Health Monitoring**: Tracks token status and remaining time
+- **Smart Alerting**: Only sends expiration emails when refresh fails
+- **Credential Sync**: Easy synchronization between development and Pi
+
+### Token Commands
+
+```bash
+# Test token health and refresh
+python main.py test --youtube-token
+
+# Manually refresh token
+python main.py refresh-token
+
+# Sync credentials between machines
+./sync_credentials.sh
+```
+
+## 🚀 Deployment and Updates
+
+### Pi Update Script
+
+Use the automated update script to safely deploy changes to your Raspberry Pi:
+
+```bash
+# On Raspberry Pi
+./update_pi.sh
+```
+
+This script:
+- Stashes local changes
+- Pulls latest updates
+- Restores local modifications
+- Restarts the service
+- Verifies system status
+
+### Development Workflow
+
+```bash
+# On development machine
+git add .
+git commit -m "Your changes"
+git push origin main
+
+# On Raspberry Pi
+./update_pi.sh
 ```
 
 ## 🔧 Installation Guide
@@ -316,6 +505,8 @@ python main.py test --sunset      # Show sunset schedule
 - Use **environment variables** for all sensitive data
 - Store **Google credentials** outside the project directory
 - Use **strong camera passwords** and change default credentials
+- **Secure email credentials** with app passwords (never use main password)
+- **Rotate tokens** regularly and monitor expiration dates
 
 ### Network Security
 - **Change default camera ports** if possible
@@ -337,21 +528,69 @@ sudo useradd -r -s /bin/false sunset-timelapse
 
 ```
 sunset-timelapse/
-├── config.yaml              # Main configuration
-├── .env                     # Environment variables (create from .env.example)
-├── requirements.txt         # Python dependencies
-├── main.py                  # CLI entry point
-├── config_manager.py        # Configuration and secrets management
-├── sunset_calculator.py     # Astronomical calculations
-├── camera_interface.py      # Camera control via ONVIF
-├── video_processor.py       # Video creation with FFmpeg
-├── youtube_uploader.py      # YouTube API integration
-├── sunset_scheduler.py      # Main orchestrator
-├── historical_retrieval.py  # Historical footage processing
-├── logs/                    # Application logs
-├── images/                  # Captured images (organized by date)
-├── videos/                  # Created videos
-└── temp/                    # Temporary files
+├── config.yaml                    # Main configuration
+├── .env                           # Environment variables (create from .env.example)
+├── requirements.txt               # Python dependencies
+├── main.py                        # CLI entry point
+├── config_manager.py              # Configuration and secrets management
+├── sunset_calculator.py           # Astronomical calculations
+├── camera_interface.py            # Camera control via ONVIF
+├── video_processor.py             # Video creation with FFmpeg
+├── youtube_uploader.py            # YouTube API integration
+├── sunset_scheduler.py            # Main orchestrator
+├── historical_retrieval.py        # Historical footage processing
+├── email_notifier.py              # Email notification system
+├── drive_uploader.py              # Google Drive backup integration
+├── sunset_brilliance_score.py     # SBS analysis engine
+├── sbs_reporter.py                # SBS reporting and analytics
+├── update_pi.sh                   # Pi deployment update script
+├── sync_credentials.sh            # Credential synchronization script
+├── logs/                          # Application logs
+├── images/                        # Captured images (organized by date)
+├── videos/                        # Created videos
+├── data/                          # SBS analysis data and reports
+└── temp/                          # Temporary files
+```
+
+## 🎥 Advanced Features
+
+### Historical Analysis
+
+```bash
+# Analyze sunset patterns over time
+python analyze_historical_sbs.py --start 2024-01-01 --end 2024-12-31
+
+# Generate monthly SBS reports
+python sbs_reporter.py --monthly-report --year 2024
+
+# Export SBS data for external analysis
+python sbs_reporter.py --export-csv --days 365
+```
+
+### Custom Analysis Tools
+
+```bash
+# Analyze sky regions and cloud patterns
+python analyze_sky_regions.py --date 2024-09-15
+
+# Debug SBS scoring algorithm
+python debug_sbs_analysis.py --image /path/to/sunset.jpg
+
+# Calibrate SBS thresholds
+python calibrate_sbs_v2.py --samples 100
+```
+
+### Batch Operations
+
+```bash
+# Bulk process historical footage
+python main.py historical --start 2024-01-01 --end 2024-01-31 --upload
+
+# Batch upload to Google Drive
+python drive_uploader.py --bulk-upload --start 2024-01-01
+
+# Regenerate SBS scores for date range
+python sbs_reporter.py --recalculate --start 2024-01-01 --end 2024-01-31
 ```
 
 ## 🐛 Troubleshooting
@@ -385,10 +624,49 @@ ffmpeg -version
 # Check authentication
 python main.py test --youtube
 
+# Test token refresh
+python main.py test --youtube-token
+
 # Verify credentials file exists
 ls -la $GOOGLE_APPLICATION_CREDENTIALS
 
 # Check API quotas in Google Cloud Console
+```
+
+**Email Notifications Not Working**
+```bash
+# Test email configuration
+python main.py test --email
+
+# Check SMTP settings
+echo $EMAIL_SMTP_SERVER $EMAIL_SMTP_PORT
+
+# Verify app password (for Gmail)
+# Make sure 2FA is enabled and app password is generated
+```
+
+**SBS Analysis Failing**
+```bash
+# Test SBS system
+python main.py test --sbs
+
+# Check OpenCV installation
+python -c "import cv2; print(cv2.__version__)"
+
+# Verify image analysis dependencies
+python -c "import numpy, scipy; print('Dependencies OK')"
+```
+
+**Google Drive Upload Issues**
+```bash
+# Test Drive integration
+python main.py test --drive
+
+# Check folder permissions
+# Ensure service account has access to target folder
+
+# Verify folder ID
+echo $GOOGLE_DRIVE_FOLDER_ID
 ```
 
 **Sunset Times Incorrect**
@@ -458,9 +736,18 @@ ls -la images/$(date +%Y-%m-%d)/
 # Manual cleanup if needed:
 python main.py schedule --validate
 
+# Update system safely on Pi
+./update_pi.sh
+
 # Update dependencies monthly
 pip list --outdated
 pip install -U package_name
+
+# Review SBS analytics monthly
+python sbs_reporter.py --report --days 30
+
+# Check token health
+python main.py test --youtube-token
 ```
 
 ### Backup Strategy
