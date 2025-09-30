@@ -153,15 +153,20 @@ def cmd_test(args):
             refresh_success = scheduler.youtube_uploader.refresh_token_proactively()
             if refresh_success:
                 logger.info("✓ Token refresh test passed")
+                # After successful refresh, do a quick health check without alerts
+                token_info_updated = scheduler.youtube_uploader.get_token_expiry_info()
+                if token_info_updated and not token_info_updated['is_expired']:
+                    logger.info("✓ Token health confirmed good after refresh")
+                else:
+                    logger.warning("⚠ Token still has issues after refresh")
             else:
                 logger.warning("⚠ Token refresh not needed or failed")
-                
-            # Test health check and alerts
-            health_check = scheduler.youtube_uploader.check_token_health_and_alert()
-            if health_check:
-                logger.info("✓ Token health check passed")
-            else:
-                logger.error("✗ Token health check failed")
+                # Only check and alert if refresh failed - this prevents false expiration alerts
+                health_check = scheduler.youtube_uploader.check_token_health_and_alert()
+                if health_check:
+                    logger.info("✓ Token health check passed")
+                else:
+                    logger.error("✗ Token health check failed")
         else:
             logger.error("✗ No token found or token invalid")
             sys.exit(1)

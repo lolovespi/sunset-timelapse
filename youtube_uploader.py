@@ -639,17 +639,20 @@ Interval: 5 seconds
                 return False
                 
             if token_info['is_expired']:
-                self.logger.warning("OAuth token is already expired - re-authentication required")
-                return False
+                self.logger.info("OAuth token is expired, attempting refresh...")
+                # Continue to refresh attempt - don't return False immediately
                 
-            if not token_info['needs_refresh']:
+            if not token_info['needs_refresh'] and not token_info['is_expired']:
                 days = token_info['days_remaining']
                 hours = token_info['hours_remaining']
                 self.logger.info(f"OAuth token is healthy - expires in {days} days, {hours} hours")
                 return True
                 
-            # Token needs refresh
-            self.logger.info("OAuth token expires soon, attempting proactive refresh...")
+            # Token needs refresh or is expired
+            if token_info['is_expired']:
+                self.logger.info("OAuth token is expired, attempting refresh...")
+            else:
+                self.logger.info("OAuth token expires soon, attempting proactive refresh...")
             
             token_file = self._get_token_file_path()
             creds = Credentials.from_authorized_user_file(token_file, self.SCOPES)
@@ -667,7 +670,8 @@ Interval: 5 seconds
                 # Update our service instance with new credentials
                 self.service = build('youtube', 'v3', credentials=creds)
                 self._authenticated = True
-                
+                self._current_credentials = creds  # Store refreshed credentials
+
                 return True
             else:
                 self.logger.warning("Cannot refresh OAuth token - refresh_token not available")

@@ -339,19 +339,22 @@ class SunsetScheduler:
         self.logger.info("Starting daily maintenance tasks...")
         
         try:
-            # Task 1: Check and refresh YouTube token proactively
-            self.logger.info("Checking YouTube token health...")
-            token_healthy = self.youtube_uploader.check_token_health_and_alert()
-            
-            if token_healthy:
-                # Try to refresh token if it needs it
-                refresh_success = self.youtube_uploader.refresh_token_proactively()
-                if refresh_success:
-                    self.logger.info("✓ YouTube token is healthy and refreshed")
-                else:
-                    self.logger.warning("⚠ YouTube token refresh failed - manual intervention may be needed")
+            # Task 1: Refresh YouTube token proactively, then check health
+            self.logger.info("Refreshing YouTube token proactively...")
+            refresh_success = self.youtube_uploader.refresh_token_proactively()
+
+            if refresh_success:
+                self.logger.info("✓ YouTube token refreshed successfully")
+                # Now check token health after refresh attempt
+                token_healthy = self.youtube_uploader.check_token_health_and_alert()
+                if not token_healthy:
+                    self.logger.warning("⚠ YouTube token still has issues after refresh - manual intervention may be needed")
             else:
-                self.logger.error("✗ YouTube token has issues - check logs and email notifications")
+                self.logger.warning("⚠ YouTube token refresh failed")
+                # Only check and alert if refresh failed - this prevents false expiration alerts
+                token_healthy = self.youtube_uploader.check_token_health_and_alert()
+                if not token_healthy:
+                    self.logger.error("✗ YouTube token has issues - check logs and email notifications")
             
             # Task 2: Clean up old SBS analysis data
             self.logger.info("Cleaning up old SBS analysis data...")
