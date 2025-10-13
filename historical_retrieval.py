@@ -89,11 +89,11 @@ class HistoricalRetrieval:
             # Reolink API endpoint for getting recordings
             # Note: This may vary by camera model and firmware version
             search_url = f"http://{self.ip}/api.cgi"
-            
-            # Construct search parameters
-            search_params = {
+
+            # Construct search parameters (API expects a list)
+            search_params = [{
                 'cmd': 'Search',
-                'token': self._get_auth_token(),
+                'action': 1,
                 'param': {
                     'Search': {
                         'channel': 0,
@@ -117,8 +117,8 @@ class HistoricalRetrieval:
                         }
                     }
                 }
-            }
-            
+            }]
+
             response = requests.post(
                 search_url,
                 json=search_params,
@@ -126,9 +126,13 @@ class HistoricalRetrieval:
                 timeout=self.timeout
             )
             response.raise_for_status()
-            
+
             result = response.json()
-            
+
+            # API returns a list, not a dict
+            if isinstance(result, list) and len(result) > 0:
+                result = result[0]
+
             if result.get('cmd') == 'Search' and result.get('code') == 0:
                 file_list = result.get('value', {}).get('SearchResult', {}).get('File', [])
                 
@@ -169,10 +173,19 @@ class HistoricalRetrieval:
             from reolinkapi import Camera as ReoCamera
             
             self.logger.info("Using official Reolink API to search for recordings")
-            
-            # Create camera instance
-            reo_camera = ReoCamera(self.ip, self.username, self.password)
-            
+
+            # Create camera instance (defer_login=True to control login timing)
+            reo_camera = ReoCamera(self.ip, self.username, self.password, defer_login=True)
+
+            # Try to login
+            login_success = reo_camera.login()
+            if not login_success or not reo_camera.token:
+                self.logger.warning("Could not establish camera session via Reolink API.")
+                self.logger.warning("This is often due to maximum concurrent session limit.")
+                self.logger.warning("Try stopping the scheduler on Raspberry Pi temporarily, or")
+                self.logger.warning("closing the Reolink app/web interface, then retry.")
+                return recordings
+
             # Search for motion recordings in date range
             current_date = start_date
             while current_date <= end_date:
@@ -180,21 +193,21 @@ class HistoricalRetrieval:
                     # Get motion files for this date
                     start_datetime = datetime.combine(current_date, datetime.min.time())
                     end_datetime = datetime.combine(current_date, datetime.max.time())
-                    
+
                     motion_files = reo_camera.get_motion_files(
                         start=start_datetime,
                         end=end_datetime,
                         streamtype='main',
                         channel=0
                     )
-                    
+
                     if motion_files:
                         self.logger.info(f"Found {len(motion_files)} motion files for {current_date}")
-                        
+
                         # Debug: log the first file structure
                         if motion_files:
                             self.logger.debug(f"Sample motion file data: {motion_files[0]}")
-                        
+
                         for motion_file in motion_files:
                             # Convert to our standard format
                             # The motion_file structure: {'start': datetime, 'end': datetime, 'filename': 'path'}
@@ -202,7 +215,7 @@ class HistoricalRetrieval:
                             file_size = motion_file.get('size') or motion_file.get('fileSize') or motion_file.get('file_size', 0)
                             start_time = motion_file.get('start') or motion_file.get('start_time') or motion_file.get('startTime')
                             end_time = motion_file.get('end') or motion_file.get('end_time') or motion_file.get('endTime')
-                            
+
                             recordings.append({
                                 'name': file_name,
                                 'file_name': file_name,
@@ -215,17 +228,29 @@ class HistoricalRetrieval:
                             })
                     else:
                         self.logger.debug(f"No motion files found for {current_date}")
-                        
+
                 except Exception as date_error:
-                    self.logger.error(f"Failed to get motion files for {current_date}: {date_error}")
-                    
+                    error_msg = str(date_error)
+                    if "Login first" in error_msg or "max session" in error_msg:
+                        self.logger.warning(f"Camera session limit reached for {current_date}. This is normal - camera has limited simultaneous connections.")
+                    else:
+                        self.logger.error(f"Failed to get motion files for {current_date}: {date_error}")
+
                 current_date += timedelta(days=1)
-                
+
+            # Clean up: logout to free the session
+            try:
+                if hasattr(reo_camera, 'logout'):
+                    reo_camera.logout()
+                    self.logger.debug("Logged out from camera session")
+            except Exception as logout_error:
+                self.logger.debug(f"Logout error (non-critical): {logout_error}")
+
         except ImportError:
             self.logger.warning("Reolink API library not available. Install with: pip install git+https://github.com/ReolinkCameraAPI/reolinkapipy.git")
         except Exception as e:
             self.logger.error(f"Failed to use Reolink official API: {e}")
-            
+
         return recordings
         
     def _try_rtsp_playback_search(self, start_date: date, end_date: date) -> List[Dict]:
@@ -399,38 +424,43 @@ class HistoricalRetrieval:
     def _get_auth_token(self) -> Optional[str]:
         """
         Get authentication token from camera
-        
+
         Returns:
             Authentication token or None if failed
         """
         try:
             login_url = f"http://{self.ip}/api.cgi"
-            login_params = {
+            login_params = [{
                 'cmd': 'Login',
+                'action': 0,
                 'param': {
                     'User': {
                         'userName': self.username,
                         'password': self.password
                     }
                 }
-            }
-            
+            }]
+
             response = requests.post(
                 login_url,
                 json=login_params,
                 timeout=self.timeout
             )
             response.raise_for_status()
-            
+
             result = response.json()
-            
+
+            # API returns a list, not a dict
+            if isinstance(result, list) and len(result) > 0:
+                result = result[0]
+
             if result.get('cmd') == 'Login' and result.get('code') == 0:
                 token = result.get('value', {}).get('Token', {}).get('name')
                 return token
             else:
                 self.logger.error(f"Login failed: {result}")
                 return None
-                
+
         except Exception as e:
             self.logger.error(f"Failed to get auth token: {e}")
             return None
