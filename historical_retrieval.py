@@ -755,56 +755,85 @@ class HistoricalRetrieval:
                                   upload_to_youtube: bool = True) -> List[Path]:
         """
         Create timelapses for a range of historical dates
-        
+
         Args:
             start_date: Start date for processing
             end_date: End date for processing
             upload_to_youtube: Whether to upload videos to YouTube
-            
+
         Returns:
             List of created video paths
         """
         self.logger.info(f"Creating historical timelapses from {start_date} to {end_date}")
-        
+
         created_videos = []
         current_date = start_date
-        
+
         while current_date <= end_date:
             try:
                 self.logger.info(f"Processing {current_date}")
-                
-                # Retrieve historical footage
-                frames = self.retrieve_historical_sunset(current_date)
-                
-                if frames and len(frames) > 10:  # Need minimum frames for video
-                    # Create timelapse
-                    video_path = self.video_processor.create_date_timelapse(current_date)
-                    
-                    if video_path:
-                        created_videos.append(video_path)
-                        self.logger.info(f"Created timelapse: {video_path}")
-                        
-                        # Upload to YouTube if requested
-                        if upload_to_youtube:
-                            try:
-                                # Calculate start and end times for this date
-                                sunset_start, sunset_end = self.sunset_calc.get_capture_window(current_date)
-                                
-                                self.youtube_uploader.upload_video(
-                                    video_path, current_date, sunset_start, sunset_end
-                                )
-                            except Exception as e:
-                                self.logger.warning(f"YouTube upload failed for {current_date}: {e}")
-                    else:
-                        self.logger.error(f"Failed to create timelapse for {current_date}")
+
+                # Check if video already exists
+                paths = self.config.get_storage_paths()
+                date_formatted = current_date.strftime('%m/%d/%y').replace('/', '_')
+                expected_video_filename = f"Sunset_{date_formatted}.{self.video_processor.output_format}"
+                expected_video_path = paths['videos'] / expected_video_filename
+
+                video_path = None
+
+                if expected_video_path.exists():
+                    self.logger.info(f"Video already exists: {expected_video_path}")
+                    video_path = expected_video_path
+                    created_videos.append(video_path)
                 else:
-                    self.logger.warning(f"Insufficient frames for {current_date} (got {len(frames) if frames else 0})")
-                    
+                    # Check if frames already exist (from previous run)
+                    date_str = current_date.strftime('%Y-%m-%d')
+                    base_image_dir = paths['images'] / date_str
+                    historical_dir = base_image_dir / 'historical'
+
+                    existing_frames = None
+                    if historical_dir.exists():
+                        frames_list = sorted(list(historical_dir.glob('frame_*.jpg')))
+                        if frames_list and len(frames_list) > 10:
+                            self.logger.info(f"Found {len(frames_list)} existing frames from previous run")
+                            existing_frames = frames_list
+
+                    # Only retrieve if we don't have frames
+                    if existing_frames:
+                        frames = existing_frames
+                    else:
+                        # Retrieve historical footage
+                        frames = self.retrieve_historical_sunset(current_date)
+
+                    if frames and len(frames) > 10:  # Need minimum frames for video
+                        # Create timelapse
+                        video_path = self.video_processor.create_date_timelapse(current_date)
+
+                        if video_path:
+                            created_videos.append(video_path)
+                            self.logger.info(f"Created timelapse: {video_path}")
+                        else:
+                            self.logger.error(f"Failed to create timelapse for {current_date}")
+                    else:
+                        self.logger.warning(f"Insufficient frames for {current_date} (got {len(frames) if frames else 0})")
+
+                # Upload to YouTube if requested and we have a video
+                if upload_to_youtube and video_path and video_path.exists():
+                    try:
+                        # Calculate start and end times for this date
+                        sunset_start, sunset_end = self.sunset_calc.get_capture_window(current_date)
+
+                        self.youtube_uploader.upload_video(
+                            video_path, current_date, sunset_start, sunset_end
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"YouTube upload failed for {current_date}: {e}")
+
             except Exception as e:
                 self.logger.error(f"Error processing {current_date}: {e}")
-                
+
             current_date += timedelta(days=1)
-            
+
         self.logger.info(f"Historical processing complete. Created {len(created_videos)} videos.")
         return created_videos
         
