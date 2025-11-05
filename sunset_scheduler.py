@@ -87,17 +87,17 @@ class SunsetScheduler:
             self.logger.error(f"✗ Sunset calculator error: {e}")
             validation_results.append(False)
             
-        # Validate camera
+        # Validate camera (non-critical - may be temporarily unavailable)
         try:
             if self.camera.test_connection():
                 self.logger.info("✓ Camera validation passed")
                 validation_results.append(True)
             else:
-                self.logger.error("✗ Camera validation failed")
-                validation_results.append(False)
+                self.logger.warning("⚠ Camera validation failed (will retry during capture)")
+                validation_results.append(True)  # Non-critical - camera may be temporarily unavailable
         except Exception as e:
-            self.logger.error(f"✗ Camera error: {e}")
-            validation_results.append(False)
+            self.logger.warning(f"⚠ Camera error: {e} (will retry during capture)")
+            validation_results.append(True)  # Non-critical - camera may be temporarily unavailable
             
         # Validate video processor
         try:

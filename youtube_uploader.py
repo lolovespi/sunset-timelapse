@@ -779,11 +779,10 @@ Interval: 5 seconds
                     self.logger.info(f"Token expires in {minutes} minutes")
                 else:
                     self.logger.info("Token has expired")
-            
-            # Test listing videos
-            recent_videos = self.list_recent_videos(5)
-            self.logger.info(f"Found {len(recent_videos)} recent videos")
-            
+
+            # REMOVED: list_recent_videos() call to save quota (100 units per call!)
+            # The expensive search API was causing quota exhaustion during crash loops
+
             self.logger.info("YouTube authentication test passed")
             return True
             
