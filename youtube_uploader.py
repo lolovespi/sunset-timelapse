@@ -63,17 +63,19 @@ class YouTubeUploader:
     def authenticate(self) -> bool:
         """
         Authenticate with YouTube API using OAuth
-        
+
+        QUOTA COST: 1 unit (channels.list call to verify authentication)
+
         Returns:
             True if authentication successful, False otherwise
         """
         if not GOOGLE_AVAILABLE:
             return False
-            
+
         try:
             creds = None
             token_file = self._get_token_file_path()
-            
+
             # Check for existing OAuth token
             if os.path.exists(token_file):
                 creds = Credentials.from_authorized_user_file(token_file, self.SCOPES)
@@ -109,6 +111,8 @@ class YouTubeUploader:
             self._authenticated = True
             
             # Test authentication by getting channel info
+            # QUOTA COST: 1 unit
+            self.logger.debug("API CALL: channels.list (1 quota unit)")
             channel_response = self.service.channels().list(
                 part='snippet',
                 mine=True
@@ -216,14 +220,16 @@ Interval: 5 seconds
                     start_time: datetime, end_time: datetime, is_test: bool = False) -> Optional[str]:
         """
         Upload video to YouTube
-        
+
+        QUOTA COST: 1,600 units (videos.insert)
+
         Args:
             video_path: Path to video file
             video_date: Date the video was captured
             start_time: Capture start time
             end_time: Capture end time
             is_test: If True, use test title format
-            
+
         Returns:
             YouTube video ID if successful, None otherwise
         """
@@ -243,15 +249,17 @@ Interval: 5 seconds
             
             self.logger.info(f"Uploading video to YouTube: {metadata['snippet']['title']}")
             self.logger.info(f"File: {video_path} ({video_path.stat().st_size / 1024 / 1024:.1f} MB)")
-            
+
             # Create media upload object
             media = MediaFileUpload(
                 str(video_path),
                 chunksize=-1,  # Upload in a single request
                 resumable=True
             )
-            
+
             # Create upload request
+            # QUOTA COST: 1,600 units
+            self.logger.info("API CALL: videos.insert (1,600 quota units)")
             request = self.service.videos().insert(
                 part=','.join(metadata.keys()),
                 body=metadata,
@@ -535,10 +543,13 @@ Interval: 5 seconds
     def list_recent_videos(self, max_results: int = 10) -> List[Dict[str, Any]]:
         """
         List recent videos from the channel
-        
+
+        QUOTA COST: 101 units (1 for channels.list + 100 for search.list)
+        WARNING: This is expensive! Only call when necessary.
+
         Args:
             max_results: Maximum number of videos to return
-            
+
         Returns:
             List of video information dictionaries
         """
@@ -554,6 +565,8 @@ Interval: 5 seconds
             channel_id = channel_info['id']
             
             # Search for videos from this channel
+            # QUOTA COST: 100 units - EXPENSIVE!
+            self.logger.warning("API CALL: search.list (100 quota units) - Consider alternatives!")
             search_response = self.service.search().list(
                 part='snippet',
                 channelId=channel_id,
