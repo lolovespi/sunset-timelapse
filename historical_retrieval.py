@@ -197,8 +197,7 @@ class HistoricalRetrieval:
                     motion_files = reo_camera.get_motion_files(
                         start=start_datetime,
                         end=end_datetime,
-                        streamtype='main',
-                        channel=0
+                        streamtype='main'
                     )
 
                     if motion_files:
