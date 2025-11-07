@@ -255,7 +255,8 @@ class CameraInterface:
                 self.logger.info(f"Starting RTSP recording chunk {chunk_idx + 1}: {' '.join(cmd_safe)}")
                 
                 # Set timeout with buffer for this chunk only
-                buffer_time = max(60, actual_chunk_duration * 0.1)  # 10% buffer, min 60s
+                # Increased buffer to 20% to handle stream reliability issues
+                buffer_time = max(120, actual_chunk_duration * 0.2)  # 20% buffer, min 120s
                 timeout_seconds = actual_chunk_duration + buffer_time
                 self.logger.info(f"Chunk timeout: {timeout_seconds:.0f} seconds ({buffer_time:.0f}s buffer)")
                 
