@@ -184,6 +184,12 @@ class HistoricalRetrieval:
                 self.logger.warning("This is often due to maximum concurrent session limit.")
                 self.logger.warning("Try stopping the scheduler on Raspberry Pi temporarily, or")
                 self.logger.warning("closing the Reolink app/web interface, then retry.")
+                # Clean up failed session before returning
+                try:
+                    if hasattr(reo_camera, 'logout'):
+                        reo_camera.logout()
+                except:
+                    pass
                 return recordings
 
             # Search for motion recordings in date range
@@ -519,23 +525,32 @@ class HistoricalRetrieval:
             filename = reolink_data.get('name', recording_info['name'])
             
             self.logger.info(f"Downloading via official Reolink API: {filename}")
-            
+
             # Create camera instance
             reo_camera = ReoCamera(self.ip, self.username, self.password)
-            
-            # Ensure output directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Download the file directly to output path
-            success = reo_camera.get_file(filename, str(output_path))
-            
-            if success and output_path.exists():
-                file_size = output_path.stat().st_size
-                self.logger.info(f"Downloaded: {output_path} ({file_size:,} bytes)")
-                return True
-            else:
-                self.logger.error(f"Failed to download file {filename}")
-                return False
+
+            try:
+                # Ensure output directory exists
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Download the file directly to output path
+                success = reo_camera.get_file(filename, str(output_path))
+
+                if success and output_path.exists():
+                    file_size = output_path.stat().st_size
+                    self.logger.info(f"Downloaded: {output_path} ({file_size:,} bytes)")
+                    return True
+                else:
+                    self.logger.error(f"Failed to download file {filename}")
+                    return False
+            finally:
+                # Always logout to free camera session
+                try:
+                    if hasattr(reo_camera, 'logout'):
+                        reo_camera.logout()
+                        self.logger.debug("Logged out from download session")
+                except Exception as e:
+                    self.logger.debug(f"Logout error during download cleanup: {e}")
                 
         except ImportError:
             self.logger.warning("Reolink API library not available, falling back to HTTP API")
