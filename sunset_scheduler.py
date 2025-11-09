@@ -356,12 +356,16 @@ class SunsetScheduler:
                 if not token_healthy:
                     self.logger.error("✗ YouTube token has issues - check logs and email notifications")
             
-            # Task 2: Clean up old SBS analysis data
+            # Task 2: Check for failed captures and attempt historical retrieval
+            self.logger.info("Checking for failed captures from yesterday...")
+            self._attempt_historical_recovery()
+
+            # Task 3: Clean up old SBS analysis data
             self.logger.info("Cleaning up old SBS analysis data...")
             sbs_retention_days = self.config.get('sbs.retention_days', 30)
             self.sbs_reporter.cleanup_old_sbs_data(sbs_retention_days)
-            
-            # Task 3: Clean up old Google Drive files
+
+            # Task 4: Clean up old Google Drive files
             drive_enabled = self.config.get('drive.enabled', False)
             if drive_enabled:
                 self.logger.info("Cleaning up old Google Drive files...")
@@ -371,13 +375,67 @@ class SunsetScheduler:
                 except Exception as e:
                     self.logger.warning(f"Drive cleanup failed: {e}")
             
-            # Task 4: Clean up local old files
+            # Task 5: Clean up local old files
             self.cleanup_old_files()
-            
+
             self.logger.info("Daily maintenance completed successfully")
-            
+
         except Exception as e:
             self.logger.error(f"Error during daily maintenance: {e}")
+
+    def _attempt_historical_recovery(self):
+        """Attempt to recover yesterday's footage if live capture failed"""
+        try:
+            yesterday = date.today() - timedelta(days=1)
+            paths = self.config.get_storage_paths()
+
+            # Check if yesterday's video already exists
+            date_formatted = yesterday.strftime('%m_%d_%y')
+            video_filename = f"Sunset_{date_formatted}.mp4"
+            video_path = paths['videos'] / video_filename
+
+            if video_path.exists():
+                self.logger.info(f"Video already exists for {yesterday}, skipping historical recovery")
+                return
+
+            # Check if yesterday's images directory exists and has images
+            images_dir = paths['images'] / yesterday.strftime('%Y-%m-%d')
+            if images_dir.exists():
+                image_files = list(images_dir.glob('img_*.jpg'))
+                if len(image_files) > 50:  # If we have enough images, live capture likely succeeded
+                    self.logger.info(f"Live capture for {yesterday} appears successful ({len(image_files)} images), skipping historical recovery")
+                    return
+
+            # Live capture likely failed - attempt historical retrieval
+            self.logger.warning(f"Live capture for {yesterday} appears to have failed - attempting historical recovery")
+
+            from historical_retrieval import HistoricalRetrieval
+            historical = HistoricalRetrieval()
+
+            # Attempt to retrieve and process historical footage
+            created_videos = historical.create_historical_timelapse(
+                yesterday,
+                yesterday,
+                upload_to_youtube=True
+            )
+
+            if created_videos:
+                self.logger.info(f"✓ Successfully recovered footage for {yesterday} via historical retrieval")
+                self.email_notifier.send_notification(
+                    f"Automatic Recovery: {yesterday}",
+                    f"Live capture failed for {yesterday}, but footage was successfully recovered from camera recordings.",
+                    {"Date": str(yesterday), "Videos Created": len(created_videos)}
+                )
+            else:
+                self.logger.warning(f"⚠ Could not recover footage for {yesterday} via historical retrieval")
+                self.email_notifier.send_notification(
+                    f"Recovery Failed: {yesterday}",
+                    f"Live capture failed for {yesterday} and automatic historical recovery also failed. Manual intervention may be required.",
+                    {"Date": str(yesterday), "Status": "FAILED"}
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error during historical recovery attempt: {e}")
     
     def cleanup_old_files(self):
         """Clean up old files based on configuration"""
