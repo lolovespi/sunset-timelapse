@@ -50,7 +50,7 @@ class SunsetCalculator:
         )
         
         self.logger.info(f"Sunset calculator initialized for {self.city}, {self.region}")
-        self.logger.info(f"Coordinates: {self.latitude:.4f}, {self.longitude:.4f}")
+        # Coordinates not logged to avoid exposing precise location information
         
     def get_sunset_time(self, target_date: date) -> datetime:
         """
