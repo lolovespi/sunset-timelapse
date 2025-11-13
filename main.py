@@ -532,14 +532,23 @@ def cmd_config(args):
     """Configuration management"""
     setup_logging()
     logger = logging.getLogger(__name__)
-    
+
     config = get_config()
-    
+
     if args.show:
         print("\n=== Current Configuration ===")
         # Display sanitized config (no secrets)
         print(f"Location: {config.get('location.city')}, {config.get('location.state')}")
-        print(f"Coordinates: {config.get('location.latitude')}, {config.get('location.longitude')}")
+
+        # Mask precise coordinates for security unless --show-coordinates is specified
+        if args.show_coordinates:
+            print(f"Coordinates: {config.get('location.latitude')}, {config.get('location.longitude')}")
+        else:
+            # Show truncated coordinates (2 decimal places = ~1km precision)
+            lat = float(config.get('location.latitude'))
+            lon = float(config.get('location.longitude'))
+            print(f"Coordinates: {lat:.2f}°, {lon:.2f}° (use --show-coordinates for full precision)")
+
         print(f"Camera IP: {config.get('camera.ip')}")
         print(f"Capture Interval: {config.get('capture.interval_seconds')}s")
         print(f"Video FPS: {config.get('video.fps')}")
@@ -755,6 +764,8 @@ Examples:
     config_parser = subparsers.add_parser('config', help='Configuration management')
     config_parser.add_argument('--show', action='store_true',
                              help='Show current configuration')
+    config_parser.add_argument('--show-coordinates', action='store_true',
+                             help='Show full precision coordinates (security: use with caution)')
     config_parser.add_argument('--validate', action='store_true',
                              help='Validate configuration')
     config_parser.set_defaults(func=cmd_config)
