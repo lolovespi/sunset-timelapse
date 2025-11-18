@@ -202,6 +202,13 @@ class MeteorDetector:
 
             # Filter to nighttime recordings
             if rec_start and rec_end:
+                # Make recording times timezone-aware to match start_time/end_time
+                # Camera recordings are in local time without timezone info
+                if rec_start.tzinfo is None:
+                    rec_start = rec_start.replace(tzinfo=start_time.tzinfo)
+                if rec_end.tzinfo is None:
+                    rec_end = rec_end.replace(tzinfo=start_time.tzinfo)
+
                 # Check overlap with search window
                 if rec_end < start_time or rec_start > end_time:
                     continue
