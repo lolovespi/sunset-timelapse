@@ -230,7 +230,8 @@ class MeteorDetector:
 
         if is_desktop and len(nighttime_recordings) > 1:
             # Parallel processing for desktop (Mac/Windows/Linux x86)
-            max_workers = min(os.cpu_count() or 4, 8)  # Cap at 8 workers
+            # Limit to 3 workers to avoid overwhelming camera's connection limit
+            max_workers = min(os.cpu_count() or 2, 3)  # Cap at 3 workers (camera session limit)
             self.logger.info(f"Using parallel processing with {max_workers} workers")
             detected_meteors = self._process_recordings_parallel(
                 nighttime_recordings, target_date, max_workers
@@ -1064,15 +1065,36 @@ def _analyze_recording_worker(recording: Dict, target_date: date) -> List[Dict]:
     This must be at module level for ProcessPoolExecutor to pickle it.
     Creates its own MeteorDetector instance to avoid sharing state.
     """
+    import time
+
     # Each worker creates its own detector instance
     detector = MeteorDetector()
     detected_meteors = []
 
-    # Download recording to temp location
+    # Download recording to temp location with retry logic for 503 errors
+    max_retries = 3
+    retry_delay = 2  # seconds
+
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir) / recording['name']
 
-        if detector.historical.download_recording(recording, temp_path):
+        download_success = False
+        for attempt in range(max_retries):
+            try:
+                if detector.historical.download_recording(recording, temp_path):
+                    download_success = True
+                    break
+                else:
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+            except Exception as e:
+                if '503' in str(e) or 'connection' in str(e).lower():
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                else:
+                    break  # Don't retry non-503 errors
+
+        if download_success:
             # Analyze video for meteors
             recording_start = recording.get('start_time')
             meteors = detector._analyze_video(temp_path, target_date, recording_start)
