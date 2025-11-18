@@ -477,22 +477,40 @@ class SunsetScheduler:
             yesterday = date.today() - timedelta(days=1)
             paths = self.config.get_storage_paths()
 
-            # Check if yesterday's video already exists
+            # Calculate expected minimum number of images for a successful capture
+            expected_images = self.sunset_calc.get_expected_image_count()
+            min_threshold = int(expected_images * 0.8)  # 80% of expected images
+
+            # Check if yesterday's images directory exists and has sufficient images
+            images_dir = paths['images'] / yesterday.strftime('%Y-%m-%d')
+            has_sufficient_images = False
+
+            if images_dir.exists():
+                image_files = list(images_dir.glob('img_*.jpg'))
+                if len(image_files) >= min_threshold:
+                    self.logger.info(f"Live capture for {yesterday} appears successful ({len(image_files)}/{expected_images} images), skipping historical recovery")
+                    has_sufficient_images = True
+                else:
+                    self.logger.warning(f"Insufficient images found for {yesterday}: {len(image_files)}/{expected_images} (threshold: {min_threshold})")
+            else:
+                self.logger.warning(f"No images directory found for {yesterday}")
+
+            # Check if video already exists (may have been manually created or recovered previously)
             date_formatted = yesterday.strftime('%m_%d_%y')
             video_filename = f"Sunset_{date_formatted}.mp4"
             video_path = paths['videos'] / video_filename
 
             if video_path.exists():
-                self.logger.info(f"Video already exists for {yesterday}, skipping historical recovery")
-                return
-
-            # Check if yesterday's images directory exists and has images
-            images_dir = paths['images'] / yesterday.strftime('%Y-%m-%d')
-            if images_dir.exists():
-                image_files = list(images_dir.glob('img_*.jpg'))
-                if len(image_files) > 50:  # If we have enough images, live capture likely succeeded
-                    self.logger.info(f"Live capture for {yesterday} appears successful ({len(image_files)} images), skipping historical recovery")
+                if has_sufficient_images:
+                    self.logger.info(f"Video and images both exist for {yesterday}, skipping historical recovery")
                     return
+                else:
+                    self.logger.warning(f"Video exists but insufficient source images for {yesterday} - may need re-processing")
+                    # Continue to historical recovery to ensure we have the best quality
+
+            # If we have sufficient images, skip recovery
+            if has_sufficient_images:
+                return
 
             # Live capture likely failed - attempt historical retrieval
             self.logger.warning(f"Live capture for {yesterday} appears to have failed - attempting historical recovery")
