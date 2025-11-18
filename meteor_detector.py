@@ -13,6 +13,9 @@ from typing import List, Dict, Optional, Tuple
 import json
 import tempfile
 from zoneinfo import ZoneInfo
+import platform
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from config_manager import get_config
 from historical_retrieval import HistoricalRetrieval
@@ -195,14 +198,12 @@ class MeteorDetector:
             self.logger.warning(f"No recordings found for {target_date}")
             return []
 
-        detected_meteors = []
-
-        # Process each recording
+        # Filter to nighttime recordings only
+        nighttime_recordings = []
         for recording in recordings:
             rec_start = recording.get('start_time')
             rec_end = recording.get('end_time')
 
-            # Filter to nighttime recordings
             if rec_start and rec_end:
                 # Make recording times timezone-aware to match start_time/end_time
                 # Camera recordings are in local time without timezone info
@@ -215,6 +216,41 @@ class MeteorDetector:
                 if rec_end < start_time or rec_start > end_time:
                     continue
 
+            nighttime_recordings.append(recording)
+
+        if not nighttime_recordings:
+            self.logger.warning(f"No nighttime recordings found for {target_date}")
+            return []
+
+        self.logger.info(f"Processing {len(nighttime_recordings)} nighttime recordings")
+
+        # Use parallel processing on Mac/desktop, sequential on Raspberry Pi
+        is_desktop = platform.system() in ['Darwin', 'Windows'] or \
+                     (platform.system() == 'Linux' and 'arm' not in platform.machine().lower())
+
+        if is_desktop and len(nighttime_recordings) > 1:
+            # Parallel processing for desktop (Mac/Windows/Linux x86)
+            max_workers = min(os.cpu_count() or 4, 8)  # Cap at 8 workers
+            self.logger.info(f"Using parallel processing with {max_workers} workers")
+            detected_meteors = self._process_recordings_parallel(
+                nighttime_recordings, target_date, max_workers
+            )
+        else:
+            # Sequential processing for Raspberry Pi or single recording
+            if not is_desktop:
+                self.logger.info("Using sequential processing (Raspberry Pi detected)")
+            detected_meteors = self._process_recordings_sequential(
+                nighttime_recordings, target_date
+            )
+
+        return detected_meteors
+
+    def _process_recordings_sequential(self, recordings: List[Dict],
+                                      target_date: date) -> List[Dict]:
+        """Process recordings sequentially (for Raspberry Pi)"""
+        detected_meteors = []
+
+        for recording in recordings:
             self.logger.debug(f"Analyzing recording: {recording.get('name', 'unknown')}")
 
             # Download recording to temp location
@@ -222,7 +258,7 @@ class MeteorDetector:
                 temp_path = Path(temp_dir) / recording['name']
 
                 if self.historical.download_recording(recording, temp_path):
-                    # Analyze video for meteors, passing recording start time for accurate timestamps
+                    # Analyze video for meteors
                     recording_start = recording.get('start_time')
                     meteors = self._analyze_video(temp_path, target_date, recording_start)
 
@@ -232,6 +268,35 @@ class MeteorDetector:
                         detected_meteors.append(meteor)
                 else:
                     self.logger.warning(f"Failed to download {recording.get('name')}")
+
+        return detected_meteors
+
+    def _process_recordings_parallel(self, recordings: List[Dict],
+                                    target_date: date, max_workers: int) -> List[Dict]:
+        """Process recordings in parallel (for Mac/desktop)"""
+        detected_meteors = []
+
+        # Use ProcessPoolExecutor for true parallelism
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all recording analysis tasks
+            future_to_recording = {
+                executor.submit(
+                    _analyze_recording_worker,
+                    recording,
+                    target_date
+                ): recording for recording in recordings
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_recording):
+                recording = future_to_recording[future]
+                try:
+                    meteors = future.result()
+                    if meteors:
+                        detected_meteors.extend(meteors)
+                        self.logger.info(f"Found {len(meteors)} meteor(s) in {recording.get('name', 'unknown')}")
+                except Exception as e:
+                    self.logger.error(f"Error processing {recording.get('name', 'unknown')}: {e}")
 
         return detected_meteors
 
@@ -954,6 +1019,35 @@ class MeteorDetector:
             stats['avg_velocity'] = np.mean(velocity_values)
 
         return stats
+
+
+# Worker function for parallel processing (must be at module level for multiprocessing)
+def _analyze_recording_worker(recording: Dict, target_date: date) -> List[Dict]:
+    """
+    Worker function for parallel video analysis
+
+    This must be at module level for ProcessPoolExecutor to pickle it.
+    Creates its own MeteorDetector instance to avoid sharing state.
+    """
+    # Each worker creates its own detector instance
+    detector = MeteorDetector()
+    detected_meteors = []
+
+    # Download recording to temp location
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir) / recording['name']
+
+        if detector.historical.download_recording(recording, temp_path):
+            # Analyze video for meteors
+            recording_start = recording.get('start_time')
+            meteors = detector._analyze_video(temp_path, target_date, recording_start)
+
+            for meteor in meteors:
+                meteor['source_recording'] = recording.get('name', 'unknown')
+                meteor['date'] = target_date.isoformat()
+                detected_meteors.append(meteor)
+
+    return detected_meteors
 
 
 def search_meteors(start_date: date, end_date: date,
