@@ -611,8 +611,9 @@ class MeteorDetector:
             if dx > 0:
                 angle_from_horizontal = np.degrees(np.arctan(dy / dx))
 
-                # Reject if motion is too horizontal (< 15 degrees from horizontal = likely plane)
-                if angle_from_horizontal < 15:
+                # Reject if motion is too horizontal (< 30 degrees from horizontal = likely plane)
+                # Increased from 15° to 30° to catch more diagonal plane paths
+                if angle_from_horizontal < 30:
                     self.logger.debug(f"Rejected: too horizontal ({angle_from_horizontal:.1f}° from horizontal, likely aircraft)")
                     return False
 
@@ -627,10 +628,42 @@ class MeteorDetector:
             if brightness_mean > 0:
                 brightness_cv = brightness_std / brightness_mean
 
-                # Reject if brightness is too steady (< 15% variation = likely plane/satellite)
-                if brightness_cv < 0.15:
+                # Reject if brightness is too steady (< 25% variation = likely plane/satellite)
+                # Increased from 15% to 25% to catch planes with some brightness variation
+                if brightness_cv < 0.25:
                     self.logger.debug(f"Rejected: brightness too steady (CV={brightness_cv:.3f}, likely aircraft/satellite)")
                     return False
+
+        # Additional check: frame duration vs distance traveled (acceleration test)
+        # Meteors maintain constant velocity, planes can appear to accelerate/decelerate
+        if len(candidate.positions) >= 5:
+            # Calculate velocity for first half vs second half
+            mid_point = len(candidate.positions) // 2
+
+            first_half_start = candidate.positions[0]
+            first_half_end = candidate.positions[mid_point]
+            first_half_dist = np.sqrt((first_half_end[0] - first_half_start[0])**2 +
+                                     (first_half_end[1] - first_half_start[1])**2)
+            first_half_frames = mid_point
+
+            second_half_start = candidate.positions[mid_point]
+            second_half_end = candidate.positions[-1]
+            second_half_dist = np.sqrt((second_half_end[0] - second_half_start[0])**2 +
+                                       (second_half_end[1] - second_half_start[1])**2)
+            second_half_frames = len(candidate.positions) - mid_point
+
+            if first_half_frames > 0 and second_half_frames > 0:
+                first_velocity = first_half_dist / first_half_frames
+                second_velocity = second_half_dist / second_half_frames
+
+                # Calculate velocity ratio (should be close to 1.0 for meteors)
+                if first_velocity > 0:
+                    velocity_ratio = second_velocity / first_velocity
+
+                    # Reject if velocity changes too much (< 0.7 or > 1.3 = likely plane)
+                    if velocity_ratio < 0.7 or velocity_ratio > 1.3:
+                        self.logger.debug(f"Rejected: inconsistent velocity (ratio={velocity_ratio:.2f}, likely aircraft)")
+                        return False
 
         self.logger.info(f"Valid meteor candidate: {candidate.frame_count} frames, "
                         f"linearity={linearity:.2f}, velocity={velocity:.2f}")
