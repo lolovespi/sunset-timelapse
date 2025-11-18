@@ -568,6 +568,8 @@ class MeteorDetector:
         - Linear path (no erratic movement)
         - Consistent brightness (no blinking = not aircraft)
         - Minimum velocity (stationary objects eliminated)
+        - Motion angle (reject mostly horizontal motion = planes)
+        - Brightness variation (reject steady lights = planes)
         """
 
         # Check frame count
@@ -595,6 +597,39 @@ class MeteorDetector:
         if not candidate.has_consistent_motion():
             self.logger.debug("Rejected: inconsistent motion (likely aircraft)")
             return False
+
+        # Additional airplane rejection: check motion angle
+        # Planes typically move horizontally, meteors have more vertical component
+        if len(candidate.positions) >= 2:
+            start_pos = candidate.positions[0]
+            end_pos = candidate.positions[-1]
+            dx = abs(end_pos[0] - start_pos[0])
+            dy = abs(end_pos[1] - start_pos[1])
+
+            # Calculate angle from horizontal (0 = horizontal, 90 = vertical)
+            if dx > 0:
+                angle_from_horizontal = np.degrees(np.arctan(dy / dx))
+
+                # Reject if motion is too horizontal (< 15 degrees from horizontal = likely plane)
+                if angle_from_horizontal < 15:
+                    self.logger.debug(f"Rejected: too horizontal ({angle_from_horizontal:.1f}° from horizontal, likely aircraft)")
+                    return False
+
+        # Additional airplane rejection: check brightness variance
+        # Planes have steady lights, meteors fade/brighten as they burn
+        if len(candidate.brightness_values) >= 3:
+            brightness_array = np.array(candidate.brightness_values)
+            brightness_std = np.std(brightness_array)
+            brightness_mean = np.mean(brightness_array)
+
+            # Calculate coefficient of variation (normalized variance)
+            if brightness_mean > 0:
+                brightness_cv = brightness_std / brightness_mean
+
+                # Reject if brightness is too steady (< 15% variation = likely plane/satellite)
+                if brightness_cv < 0.15:
+                    self.logger.debug(f"Rejected: brightness too steady (CV={brightness_cv:.3f}, likely aircraft/satellite)")
+                    return False
 
         self.logger.info(f"Valid meteor candidate: {candidate.frame_count} frames, "
                         f"linearity={linearity:.2f}, velocity={velocity:.2f}")
