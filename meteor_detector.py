@@ -734,9 +734,37 @@ class MeteorDetector:
                                 mean_brightness = cv2.mean(gray, mask=mask_roi)[0]
 
                                 if mean_brightness > self.min_brightness_threshold:
+                                    # Additional filters to reject insects/artifacts
+
+                                    # 1. Reject extremely bright objects (insects near IR illuminator)
+                                    # Meteors are bright but not blindingly so
+                                    if mean_brightness > 250:
+                                        self.logger.debug(f"Rejected single-frame: too bright ({mean_brightness:.0f}, likely insect near IR)")
+                                        continue
+
+                                    # 2. Reject very elongated streaks (motion blur artifacts, not meteors)
+                                    # Meteors should have aspect ratio 3-20, not 100+
+                                    if aspect_ratio > 20:
+                                        self.logger.debug(f"Rejected single-frame: extreme aspect ratio ({aspect_ratio:.1f}, likely artifact)")
+                                        continue
+
+                                    # 3. Reject near-horizontal streaks (insects/planes move horizontally)
+                                    # Angle from fitEllipse is 0-180, need to convert to angle from horizontal
+                                    # OpenCV angle: 0° = horizontal, 90° = vertical
+                                    angle_from_horizontal = min(abs(angle), abs(angle - 180))
+                                    if angle_from_horizontal > 90:
+                                        angle_from_horizontal = 180 - angle_from_horizontal
+
+                                    # Reject if angle is too horizontal (< 35° from horizontal)
+                                    # Meteors typically have steeper entry angles
+                                    if angle_from_horizontal < 35:
+                                        self.logger.debug(f"Rejected single-frame: too horizontal ({angle_from_horizontal:.1f}° from horizontal, likely insect/plane)")
+                                        continue
+
                                     self.logger.info(f"Single-frame meteor detected! "
                                                    f"Frame {frame_num}, y={cy}, aspect_ratio={aspect_ratio:.1f}, "
-                                                   f"length={major_axis:.0f}px, brightness={mean_brightness:.0f}")
+                                                   f"length={major_axis:.0f}px, brightness={mean_brightness:.0f}, "
+                                                   f"angle={angle_from_horizontal:.1f}° from horizontal")
 
                                     single_frame_meteors.append({
                                         'frame_num': frame_num,
