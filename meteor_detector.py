@@ -125,11 +125,13 @@ class MeteorDetector:
         # Get timezone from config
         local_tz = ZoneInfo(self.timezone_str)
 
-        # If datetime is naive (no timezone), assume UTC
+        # If datetime is naive (no timezone), assume it's already in local time
+        # Camera recordings come from Reolink API in local time without timezone info
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo('UTC'))
+            dt = dt.replace(tzinfo=local_tz)
+            return dt
 
-        # Convert to local timezone
+        # Convert to local timezone if it has timezone info
         return dt.astimezone(local_tz)
 
     def search_date_range(self, start_date: date, end_date: date,
