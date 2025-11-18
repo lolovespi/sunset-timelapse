@@ -63,16 +63,68 @@ class ConfigManager:
         return obj
             
     def _validate_config(self):
-        """Validate required configuration sections exist"""
+        """Validate required configuration sections and critical values"""
         required_sections = ['location', 'camera', 'capture', 'video', 'storage', 'youtube']
         missing_sections = []
-        
+
         for section in required_sections:
             if section not in self.config:
                 missing_sections.append(section)
-                
+
         if missing_sections:
             raise ValueError(f"Missing required configuration sections: {missing_sections}")
+
+        # Validate critical configuration values to prevent misconfigurations
+        validation_errors = []
+
+        # Validate camera IP format
+        camera_ip = self.get('camera.ip')
+        if camera_ip:
+            import re
+            if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', str(camera_ip)):
+                validation_errors.append(f"Invalid camera IP format: {camera_ip}")
+
+        # Validate ports are integers in valid range
+        for port_key in ['camera.onvif_port', 'camera.rtsp_port']:
+            port = self.get(port_key)
+            if port is not None:
+                try:
+                    port_int = int(port)
+                    if not (1 <= port_int <= 65535):
+                        validation_errors.append(f"{port_key} must be between 1-65535, got {port}")
+                except (ValueError, TypeError):
+                    validation_errors.append(f"{port_key} must be an integer, got {port}")
+
+        # Validate location coordinates
+        latitude = self.get('location.latitude')
+        longitude = self.get('location.longitude')
+        if latitude is not None:
+            try:
+                lat_float = float(latitude)
+                if not (-90 <= lat_float <= 90):
+                    validation_errors.append(f"Latitude must be between -90 and 90, got {latitude}")
+            except (ValueError, TypeError):
+                validation_errors.append(f"Latitude must be a number, got {latitude}")
+        if longitude is not None:
+            try:
+                lon_float = float(longitude)
+                if not (-180 <= lon_float <= 180):
+                    validation_errors.append(f"Longitude must be between -180 and 180, got {longitude}")
+            except (ValueError, TypeError):
+                validation_errors.append(f"Longitude must be a number, got {longitude}")
+
+        # Validate time values are positive
+        for time_key in ['capture.interval_seconds', 'capture.duration_minutes']:
+            time_val = self.get(time_key)
+            if time_val is not None:
+                try:
+                    if int(time_val) <= 0:
+                        validation_errors.append(f"{time_key} must be positive, got {time_val}")
+                except (ValueError, TypeError):
+                    validation_errors.append(f"{time_key} must be an integer, got {time_val}")
+
+        if validation_errors:
+            raise ValueError(f"Configuration validation errors:\n  " + "\n  ".join(validation_errors))
             
     def get(self, key_path: str, default: Any = None) -> Any:
         """

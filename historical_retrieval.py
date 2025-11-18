@@ -6,6 +6,7 @@ Creates timelapses from historical data
 
 import logging
 import time
+import os
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
@@ -21,6 +22,32 @@ from config_manager import get_config
 from sunset_calculator import SunsetCalculator
 from video_processor import VideoProcessor
 from youtube_uploader import YouTubeUploader
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename to prevent path traversal attacks
+
+    Args:
+        filename: Untrusted filename from external source
+
+    Returns:
+        Safe filename with path traversal attempts removed
+    """
+    # Get just the basename to prevent directory traversal
+    safe = os.path.basename(filename)
+
+    # Remove any remaining path separators and parent directory references
+    safe = safe.replace('..', '').replace('/', '').replace('\\', '')
+
+    # Remove null bytes
+    safe = safe.replace('\x00', '')
+
+    # Ensure it's not empty after sanitization
+    if not safe or safe in ('.', '..'):
+        safe = 'unknown_file'
+
+    return safe
 
 
 class HistoricalRetrieval:
@@ -523,8 +550,13 @@ class HistoricalRetrieval:
             
             reolink_data = recording_info.get('reolink_data', {})
             filename = reolink_data.get('name', recording_info['name'])
-            
-            self.logger.info(f"Downloading via official Reolink API: {filename}")
+
+            # Sanitize filename to prevent path traversal attacks
+            safe_filename = sanitize_filename(filename)
+            if safe_filename != filename:
+                self.logger.warning(f"Sanitized potentially unsafe filename: {filename} -> {safe_filename}")
+
+            self.logger.info(f"Downloading via official Reolink API: {safe_filename}")
 
             # Create camera instance
             reo_camera = ReoCamera(self.ip, self.username, self.password)
@@ -533,7 +565,7 @@ class HistoricalRetrieval:
                 # Ensure output directory exists
                 output_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # Download the file directly to output path
+                # Download the file directly to output path (using sanitized filename)
                 success = reo_camera.get_file(filename, str(output_path))
 
                 if success and output_path.exists():

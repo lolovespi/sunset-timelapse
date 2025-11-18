@@ -14,6 +14,7 @@ from config_manager import get_config
 from sunset_scheduler import SunsetScheduler
 from historical_retrieval import HistoricalRetrieval
 from sunset_calculator import SunsetCalculator
+from meteor_detector import MeteorDetector
 
 
 def setup_logging():
@@ -555,6 +556,130 @@ def cmd_config(args):
             sys.exit(1)
 
 
+def cmd_meteor(args):
+    """Search for and detect meteors in video footage"""
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
+    logger.info("Starting meteor detection system...")
+
+    detector = MeteorDetector()
+
+    if args.stats:
+        logger.info("Gathering meteor detection statistics...")
+        stats = detector.get_detection_stats()
+
+        print("\n=== Meteor Detection Statistics ===")
+        print(f"Total Detections: {stats['total_detections']}")
+        print(f"Average Brightness: {stats['avg_brightness']:.1f}")
+        print(f"Average Velocity: {stats['avg_velocity']:.2f} px/frame")
+        print(f"Clips Directory: {stats['clips_directory']}")
+
+        if stats['detections_by_date']:
+            print("\nDetections by Date:")
+            for date_key, count in sorted(stats['detections_by_date'].items()):
+                print(f"  {date_key}: {count} meteor(s)")
+        return
+
+    if args.analyze_video:
+        # Analyze a specific local video file
+        video_path = Path(args.analyze_video)
+        if not video_path.exists():
+            logger.error(f"Video file not found: {video_path}")
+            sys.exit(1)
+
+        logger.info(f"Analyzing local video: {video_path}")
+
+        # Use provided date or extract from filename
+        if args.date:
+            try:
+                analysis_date = datetime.strptime(args.date, '%Y-%m-%d').date()
+            except ValueError:
+                logger.error("Invalid date format. Use YYYY-MM-DD")
+                sys.exit(1)
+        else:
+            analysis_date = date.today()
+
+        meteors = detector.analyze_local_video(video_path, analysis_date)
+
+        if meteors:
+            print(f"\n=== Found {len(meteors)} Meteor(s) ===")
+            for i, meteor in enumerate(meteors, 1):
+                print(f"\nMeteor #{i}:")
+                print(f"  Clip: {meteor['filename']}")
+                print(f"  Timestamp: {meteor['timestamp']}")
+                print(f"  Duration: {meteor['duration_seconds']:.2f}s ({meteor['duration_frames']} frames)")
+                print(f"  Max Brightness: {meteor['max_brightness']:.1f}")
+                print(f"  Linearity: {meteor['linearity_score']:.3f}")
+                print(f"  Velocity: {meteor['velocity']:.2f} px/frame")
+            logger.info(f"Extracted {len(meteors)} meteor clip(s)")
+        else:
+            logger.info("No meteors detected in video")
+        return
+
+    # Search camera recordings for specified date range
+    if not args.start_date or not args.end_date:
+        logger.error("Date range required. Use --start and --end")
+        sys.exit(1)
+
+    try:
+        start_date = datetime.strptime(args.start_date, '%Y-%m-%d').date()
+        end_date = datetime.strptime(args.end_date, '%Y-%m-%d').date()
+    except ValueError as e:
+        logger.error(f"Invalid date format. Use YYYY-MM-DD: {e}")
+        sys.exit(1)
+
+    if start_date > end_date:
+        logger.error("Start date must be before end date")
+        sys.exit(1)
+
+    # Parse optional time constraints
+    start_time = None
+    end_time = None
+
+    if args.start_time:
+        try:
+            time_parts = datetime.strptime(args.start_time, '%H:%M').time()
+            start_time = datetime.combine(start_date, time_parts)
+        except ValueError:
+            logger.error("Invalid start time format. Use HH:MM")
+            sys.exit(1)
+
+    if args.end_time:
+        try:
+            time_parts = datetime.strptime(args.end_time, '%H:%M').time()
+            end_time = datetime.combine(end_date, time_parts)
+        except ValueError:
+            logger.error("Invalid end time format. Use HH:MM")
+            sys.exit(1)
+
+    logger.info(f"Searching for meteors from {start_date} to {end_date}")
+
+    meteors = detector.search_date_range(start_date, end_date, start_time, end_time)
+
+    if meteors:
+        print(f"\n=== Found {len(meteors)} Meteor(s) ===")
+        for i, meteor in enumerate(meteors, 1):
+            print(f"\nMeteor #{i}:")
+            print(f"  Date: {meteor.get('date', 'unknown')}")
+            print(f"  Clip: {meteor['filename']}")
+            print(f"  Timestamp: {meteor['timestamp']}")
+            print(f"  Source: {meteor.get('source_recording', 'unknown')}")
+            print(f"  Duration: {meteor['duration_seconds']:.2f}s")
+            print(f"  Max Brightness: {meteor['max_brightness']:.1f}")
+            print(f"  Linearity: {meteor['linearity_score']:.3f}")
+            print(f"  Velocity: {meteor['velocity']:.2f} px/frame")
+
+        logger.info(f"Successfully detected and extracted {len(meteors)} meteor clip(s)")
+        print(f"\nClips saved to: {detector.meteor_dir}")
+    else:
+        logger.info("No meteors detected in the specified date range")
+        print("\nNo meteors detected. Tips:")
+        print("  - Ensure camera recordings exist for the date range")
+        print("  - Try adjusting detection thresholds in config.yaml")
+        print("  - Check logs for analysis details")
+
+
 def cmd_sbs(args):
     """Sunset Brilliance Score analysis and reporting"""
     setup_logging()
@@ -776,14 +901,32 @@ Examples:
     sbs_parser.add_argument('--date', help='Analyze specific date (YYYY-MM-DD, default: yesterday)')
     sbs_parser.add_argument('--report', action='store_true',
                           help='Generate daily SBS report')
-    sbs_parser.add_argument('--export', action='store_true', 
+    sbs_parser.add_argument('--export', action='store_true',
                           help='Export historical SBS data to CSV')
     sbs_parser.add_argument('--start', help='Start date for export (YYYY-MM-DD)')
     sbs_parser.add_argument('--end', help='End date for export (YYYY-MM-DD)')
     sbs_parser.add_argument('--cleanup', action='store_true',
                           help='Clean up old SBS analysis data')
     sbs_parser.set_defaults(func=cmd_sbs)
-    
+
+    # Meteor detection command
+    meteor_parser = subparsers.add_parser('meteor', help='Detect and extract meteor events from video')
+    meteor_parser.add_argument('--start', dest='start_date',
+                              help='Start date for camera search (YYYY-MM-DD)')
+    meteor_parser.add_argument('--end', dest='end_date',
+                              help='End date for camera search (YYYY-MM-DD)')
+    meteor_parser.add_argument('--start-time', dest='start_time',
+                              help='Start time for search window (HH:MM, default: 18:00)')
+    meteor_parser.add_argument('--end-time', dest='end_time',
+                              help='End time for search window (HH:MM, default: 06:00 next day)')
+    meteor_parser.add_argument('--analyze-video', dest='analyze_video',
+                              help='Analyze a specific local video file')
+    meteor_parser.add_argument('--date',
+                              help='Date to use for local video analysis (YYYY-MM-DD)')
+    meteor_parser.add_argument('--stats', action='store_true',
+                              help='Show meteor detection statistics')
+    meteor_parser.set_defaults(func=cmd_meteor)
+
     # Parse arguments
     args = parser.parse_args()
     

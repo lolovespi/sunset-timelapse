@@ -96,7 +96,7 @@ advanced:
 
 sbs:
   enabled: true
-     analysis_resize_height: 80  # Performance fix
+  analysis_resize_height: 80  # Performance fix
 
   # Sky region boundaries (currently using code defaults)
   horizon_region_ratio: 0.8      # Focus on lower 80% for sunset glow
@@ -111,3 +111,29 @@ sbs:
   save_frame_metrics: true
   save_chunk_summaries: true
   performance_logging: true
+
+# Meteor detection settings
+meteor:
+  enabled: false                 # Set to true to enable automatic overnight meteor scanning at 7 AM
+
+  # Nighttime scanning window (automatically uses sunset/sunrise times)
+  sunset_offset_minutes: 30      # Start scanning this many minutes AFTER sunset (ensures darkness)
+  sunrise_offset_minutes: 30     # Stop scanning this many minutes BEFORE sunrise (avoids daylight)
+
+  # Detection thresholds
+  min_brightness_threshold: 200  # Minimum brightness (0-255) to consider as potential meteor
+  min_area: 10                   # Minimum pixel area for detection
+  max_area: 5000                 # Maximum pixel area (filter out large bright objects)
+
+  # Track validation
+  min_frames: 3                  # Minimum frames to confirm meteor (filters noise)
+  max_frames: 30                 # Maximum frames (meteors are brief events)
+  min_linearity: 0.85            # Path linearity score (0-1, higher = more linear)
+  min_velocity: 5.0              # Minimum velocity in pixels/frame
+  max_gap_frames: 2              # Max frames between detections to continue track
+
+  # Clip extraction
+  clip_padding_seconds: 3        # Seconds of padding before/after meteor event
+
+  # Storage
+  retention_days: 30             # Keep meteor clips for this many days

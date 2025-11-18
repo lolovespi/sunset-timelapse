@@ -47,8 +47,10 @@ class DriveUploader:
         # Drive settings from config
         self.folder_name = self.config.get('drive.folder_name', 'Sunset Timelapses')
         self.folder_id = None  # Will be found/created dynamically
+        self.meteor_folder_name = self.config.get('drive.meteor_folder_name', 'meteors')
+        self.meteor_folder_id = None  # Separate folder for meteor clips
         self.cleanup_after_days = self.config.get('drive.cleanup_after_days', 7)
-        
+
         self.logger.info("Google Drive uploader initialized")
     
     def get_token_file_path(self) -> str:
@@ -102,8 +104,9 @@ class DriveUploader:
             self._authenticated = True
             self.logger.info("Google Drive authentication successful")
             
-            # Ensure upload folder exists
+            # Ensure upload folders exist
             self._ensure_upload_folder()
+            self._ensure_meteor_folder()
             return True
             
         except Exception as e:
@@ -117,7 +120,7 @@ class DriveUploader:
             query = f"name='{self.folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
             results = self.service.files().list(q=query, fields='files(id, name)').execute()
             files = results.get('files', [])
-            
+
             if files:
                 self.folder_id = files[0]['id']
                 self.logger.info(f"Found existing Drive folder: {self.folder_name} ({self.folder_id})")
@@ -127,15 +130,43 @@ class DriveUploader:
                     'name': self.folder_name,
                     'mimeType': 'application/vnd.google-apps.folder'
                 }
-                
+
                 folder = self.service.files().create(body=folder_metadata, fields='id').execute()
                 self.folder_id = folder.get('id')
                 self.logger.info(f"Created new Drive folder: {self.folder_name} ({self.folder_id})")
-            
+
             return True
-            
+
         except HttpError as e:
             self.logger.error(f"Failed to ensure upload folder: {e}")
+            return False
+
+    def _ensure_meteor_folder(self) -> bool:
+        """Ensure the meteor clips folder exists in Drive"""
+        try:
+            # Search for existing folder
+            query = f"name='{self.meteor_folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            results = self.service.files().list(q=query, fields='files(id, name)').execute()
+            files = results.get('files', [])
+
+            if files:
+                self.meteor_folder_id = files[0]['id']
+                self.logger.info(f"Found existing Drive folder: {self.meteor_folder_name} ({self.meteor_folder_id})")
+            else:
+                # Create new folder
+                folder_metadata = {
+                    'name': self.meteor_folder_name,
+                    'mimeType': 'application/vnd.google-apps.folder'
+                }
+
+                folder = self.service.files().create(body=folder_metadata, fields='id').execute()
+                self.meteor_folder_id = folder.get('id')
+                self.logger.info(f"Created new Drive folder: {self.meteor_folder_name} ({self.meteor_folder_id})")
+
+            return True
+
+        except HttpError as e:
+            self.logger.error(f"Failed to ensure meteor folder: {e}")
             return False
     
     def upload_video(self, video_path: Path, target_date: date, 
@@ -201,6 +232,134 @@ class DriveUploader:
         except Exception as e:
             self.logger.error(f"Drive upload failed: {e}")
             return None
+
+    def upload_meteor_clip(self, clip_path: Path, meteor_metadata: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """
+        Upload meteor clip to Google Drive in meteors folder
+
+        Args:
+            clip_path: Path to meteor video clip
+            meteor_metadata: Meteor detection metadata (timestamp, brightness, etc.)
+
+        Returns:
+            Dict with file_id and public_url if successful, None if failed
+        """
+        if not self.authenticate():
+            self.logger.error("Drive authentication failed")
+            return None
+
+        try:
+            filename = clip_path.name
+
+            # Prepare file metadata
+            file_metadata = {
+                'name': filename,
+                'parents': [self.meteor_folder_id] if self.meteor_folder_id else [],
+                'description': self._generate_meteor_description(meteor_metadata)
+            }
+
+            # Upload file
+            self.logger.info(f"Uploading {filename} to Google Drive (meteors folder)...")
+            media = MediaFileUpload(str(clip_path), mimetype='video/mp4', resumable=True)
+
+            file = self.service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id, name, size, webViewLink'
+            ).execute()
+
+            file_id = file.get('id')
+            file_size = file.get('size', 0)
+            web_link = file.get('webViewLink')
+
+            self.logger.info(f"Meteor clip uploaded: {filename}")
+            self.logger.info(f"File ID: {file_id}")
+            self.logger.info(f"File size: {int(file_size) / (1024*1024):.1f} MB")
+
+            # Make file publicly accessible
+            public_url = self._make_file_public(file_id)
+
+            # Create metadata file for the meteor clip
+            self._create_meteor_metadata_file(file_id, meteor_metadata, public_url)
+
+            return {
+                'file_id': file_id,
+                'public_url': public_url,
+                'web_link': web_link,
+                'filename': filename
+            }
+
+        except Exception as e:
+            self.logger.error(f"Meteor clip upload failed: {e}")
+            return None
+
+    def _generate_meteor_description(self, meteor_metadata: Dict[str, Any]) -> str:
+        """Generate description for meteor clip"""
+        timestamp = meteor_metadata.get('timestamp', 'Unknown')
+        brightness = meteor_metadata.get('max_brightness', 0)
+        duration = meteor_metadata.get('duration_frames', 0)
+        detection_type = meteor_metadata.get('detection_type', 'unknown')
+
+        description = f"Meteor detected on {timestamp}\n"
+        description += f"Detection type: {detection_type}\n"
+        description += f"Peak brightness: {brightness}\n"
+        description += f"Duration: {duration} frames\n"
+        description += f"Location: {self.config.get('location.city')}, {self.config.get('location.state')}\n"
+        description += "Automatically detected and uploaded by Sunset Timelapse System"
+
+        return description
+
+    def _create_meteor_metadata_file(self, file_id: str, meteor_metadata: Dict, public_url: Optional[str]):
+        """Create metadata file for meteor clip"""
+        try:
+            meta_data = {
+                'file_id': file_id,
+                'public_url': public_url,
+                'location': f"{self.config.get('location.city')}, {self.config.get('location.state')}",
+                'coordinates': {
+                    'latitude': self.config.get('location.latitude'),
+                    'longitude': self.config.get('location.longitude')
+                },
+                'uploaded_at': datetime.now().isoformat()
+            }
+
+            # Add all meteor metadata
+            meta_data.update(meteor_metadata)
+
+            # Generate metadata filename
+            timestamp = meteor_metadata.get('timestamp', datetime.now().isoformat())
+            meta_filename = f"meteor_{timestamp.replace(':', '-')}_metadata.json"
+
+            file_metadata = {
+                'name': meta_filename,
+                'parents': [self.meteor_folder_id] if self.meteor_folder_id else []
+            }
+
+            # Create temporary file for metadata upload
+            import tempfile
+            import os
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_file:
+                tmp_file.write(json.dumps(meta_data, indent=2, default=str))
+                tmp_file_path = tmp_file.name
+
+            try:
+                media = MediaFileUpload(tmp_file_path, mimetype='application/json')
+
+                self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id'
+                ).execute()
+
+                self.logger.info(f"Meteor metadata file created: {meta_filename}")
+
+            finally:
+                # Clean up temporary file
+                if os.path.exists(tmp_file_path):
+                    os.unlink(tmp_file_path)
+
+        except Exception as e:
+            self.logger.warning(f"Failed to create meteor metadata file: {e}")
     
     def _make_file_public(self, file_id: str) -> Optional[str]:
         """Make file publicly accessible and return direct download URL"""

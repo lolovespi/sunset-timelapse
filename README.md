@@ -7,10 +7,11 @@ An automated system for capturing daily sunset timelapses using a Reolink camera
 - **Automated Daily Capture**: Calculates sunset times based on location and captures images 1 hour before/after sunset
 - **Smart Scheduling**: Uses astronomical calculations to determine optimal capture windows
 - **🌟 Sunset Brilliance Score (SBS)**: AI-powered analysis to automatically enhance exceptional sunsets with special titles
+- **☄️ Meteor Detection**: Automated overnight scanning for meteor events with intelligent deduplication
 - **Video Processing**: Creates high-quality timelapse videos from image sequences using FFmpeg
 - **YouTube Integration**: Automatically uploads videos with proper metadata and descriptions
-- **📧 Email Notifications**: Real-time alerts for uploads, errors, and system status
-- **☁️ Google Drive Backup**: Automatic cloud storage for videos and metadata
+- **📧 Email Notifications**: Real-time alerts for uploads, errors, meteor detections, and system status
+- **☁️ Google Drive Backup**: Automatic cloud storage for videos, meteor clips, and metadata
 - **Historical Retrieval**: Downloads and processes historical footage from camera storage
 - **🔐 Enhanced Token Management**: Automatic OAuth token refresh with health monitoring
 - **Multi-Platform**: Raspberry Pi for daily operations, MacBook for processing power
@@ -145,6 +146,15 @@ sbs:
   retention_days: 30
   analysis_enabled: true
 
+# Meteor detection settings
+meteor:
+  enabled: true                      # Enable automatic overnight meteor scanning
+  sunset_offset_minutes: 30          # Start scanning after sunset + offset
+  sunrise_offset_minutes: 30         # Stop scanning before sunrise - offset
+  min_brightness_threshold: 200      # Meteor brightness threshold (0-255)
+  min_frames: 3                      # Minimum frames to confirm meteor
+  retention_days: 30                 # Keep meteor clips for 30 days
+
 # Email notification settings
 email:
   enabled: true
@@ -236,6 +246,25 @@ python main.py historical --start 2024-01-01 --end 2024-01-07 --upload
 # Process without YouTube upload
 python main.py historical --start 2024-01-01 --end 2024-01-07
 ```
+
+### Meteor Detection
+
+```bash
+# Search camera recordings for meteors in date range
+# Automatically uses sunset/sunrise times for nighttime-only scanning
+python main.py meteor --start 2024-01-01 --end 2024-01-07
+
+# Search with specific time window (override automatic sunset/sunrise)
+python main.py meteor --start 2024-01-01 --end 2024-01-07 --start-time 20:00 --end-time 05:00
+
+# Analyze a specific local video file
+python main.py meteor --analyze-video /path/to/video.mp4 --date 2024-01-01
+
+# Show meteor detection statistics
+python main.py meteor --stats
+```
+
+Note: Meteor scanning is automatically scheduled to run every morning at 7 AM on the Raspberry Pi when `meteor.enabled: true` is set in config.yaml.
 
 ### System Management
 
@@ -537,10 +566,11 @@ sunset-timelapse/
 ├── camera_interface.py            # Camera control via ONVIF
 ├── video_processor.py             # Video creation with FFmpeg
 ├── youtube_uploader.py            # YouTube API integration
-├── sunset_scheduler.py            # Main orchestrator
+├── sunset_scheduler.py            # Main orchestrator (includes meteor scheduling)
 ├── historical_retrieval.py        # Historical footage processing
+├── meteor_detector.py             # Meteor detection and analysis engine
 ├── email_notifier.py              # Email notification system
-├── drive_uploader.py              # Google Drive backup integration
+├── drive_uploader.py              # Google Drive backup integration (videos + meteors)
 ├── sunset_brilliance_score.py     # SBS analysis engine
 ├── sbs_reporter.py                # SBS reporting and analytics
 ├── update_pi.sh                   # Pi deployment update script
@@ -549,10 +579,62 @@ sunset-timelapse/
 ├── images/                        # Captured images (organized by date)
 ├── videos/                        # Created videos
 ├── data/                          # SBS analysis data and reports
+│   └── meteors/                   # Detected meteor clips and metadata
 └── temp/                          # Temporary files
 ```
 
 ## 🎥 Advanced Features
+
+### ☄️ Meteor Detection System
+
+The automated meteor detection system uses computer vision to scan overnight camera footage for meteor events.
+
+#### How Meteor Detection Works
+
+1. **Automated Scheduling**: Scans run every morning at 7 AM analyzing the previous night's footage
+2. **Intelligent Time Windows**: Uses actual sunset/sunrise times (with configurable offsets) for nighttime-only scanning
+3. **Multi-Method Detection**:
+   - Multi-frame tracking for slower meteors
+   - Single-frame streak detection for fast meteors
+4. **Smart Deduplication**: Automatically eliminates duplicate detections of the same meteor event
+5. **Timezone-Aware Timestamps**: All meteor clips have accurate CST/CDT timestamps in filenames
+6. **Google Drive Backup**: Meteor clips automatically uploaded to separate "meteors" folder
+7. **Email Notifications**: Get alerts when meteors are detected with clip details and Drive links
+
+#### Meteor Configuration
+
+```yaml
+meteor:
+  enabled: true                      # Enable automatic overnight meteor scanning
+  sunset_offset_minutes: 30          # Start 30 min after sunset (ensures darkness)
+  sunrise_offset_minutes: 30         # Stop 30 min before sunrise (avoids daylight)
+
+  # Detection thresholds
+  min_brightness_threshold: 200      # Minimum brightness (0-255)
+  min_area: 10                       # Minimum pixel area
+  max_area: 5000                     # Maximum pixel area (filter large objects)
+
+  # Track validation
+  min_frames: 3                      # Minimum frames to confirm meteor
+  min_linearity: 0.85                # Path linearity score (0-1)
+  min_velocity: 5.0                  # Minimum velocity in pixels/frame
+
+  # Storage
+  retention_days: 30                 # Keep meteor clips for 30 days
+```
+
+#### Meteor Detection Commands
+
+```bash
+# Manual scan for specific date range
+python main.py meteor --start 2024-11-16 --end 2024-11-17
+
+# Analyze local video file
+python main.py meteor --analyze-video /path/to/video.mp4 --date 2024-11-16
+
+# View detection statistics
+python main.py meteor --stats
+```
 
 ### Historical Analysis
 

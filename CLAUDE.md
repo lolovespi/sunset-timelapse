@@ -54,6 +54,22 @@ python main.py historical --start 2024-01-01 --end 2024-01-07 --upload
 python main.py historical --start 2024-01-01 --end 2024-01-07
 ```
 
+### Meteor Detection
+```bash
+# Search camera recordings for meteors in date range
+# Automatically uses sunset/sunrise times for nighttime-only scanning
+python main.py meteor --start 2024-01-01 --end 2024-01-07
+
+# Search with specific time window (override automatic sunset/sunrise)
+python main.py meteor --start 2024-01-01 --end 2024-01-07 --start-time 20:00 --end-time 05:00
+
+# Analyze a specific local video file
+python main.py meteor --analyze-video /path/to/video.mp4 --date 2024-01-01
+
+# Show meteor detection statistics
+python main.py meteor --stats
+```
+
 ## Architecture
 
 ### Core Components
@@ -66,6 +82,7 @@ python main.py historical --start 2024-01-01 --end 2024-01-07
 6. **youtube_uploader.py** - Google API integration for YouTube uploads
 7. **sunset_scheduler.py** - Main orchestrator that coordinates daily operations
 8. **historical_retrieval.py** - Bulk processing of historical camera footage
+9. **meteor_detector.py** - OpenCV-based meteor detection and clip extraction
 
 ### Configuration System
 
@@ -81,6 +98,8 @@ The system uses a two-tier configuration approach:
 - **google-api-python-client**: YouTube API integration
 - **schedule**: Task scheduling for Raspberry Pi operations
 - **colorlog**: Enhanced logging with color output
+- **opencv-python-headless**: Computer vision for meteor detection and SBS analysis
+- **numpy/scipy**: Mathematical operations for image analysis
 
 ## Development Notes
 

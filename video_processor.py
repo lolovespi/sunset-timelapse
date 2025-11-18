@@ -365,13 +365,25 @@ class VideoProcessor:
             
             if not video_stream:
                 return None
-                
+
+            # Safely parse FPS fraction without eval() to prevent code injection
+            def parse_fps_fraction(fraction_str: str) -> float:
+                """Safely parse FPS fraction like '12/1' without using eval()"""
+                try:
+                    if '/' in fraction_str:
+                        numerator, denominator = fraction_str.split('/', 1)
+                        return float(numerator) / float(denominator)
+                    else:
+                        return float(fraction_str)
+                except (ValueError, ZeroDivisionError, AttributeError):
+                    return 0.0
+
             info = {
                 'duration': float(probe['format']['duration']),
                 'size': int(probe['format']['size']),
                 'width': int(video_stream['width']),
                 'height': int(video_stream['height']),
-                'fps': eval(video_stream['r_frame_rate']),  # Fraction like "12/1"
+                'fps': parse_fps_fraction(video_stream['r_frame_rate']),
                 'codec': video_stream['codec_name'],
                 'bitrate': int(probe['format']['bit_rate'])
             }

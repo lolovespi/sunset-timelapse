@@ -22,6 +22,7 @@ from youtube_uploader import YouTubeUploader
 from drive_uploader import DriveUploader
 from email_notifier import EmailNotifier
 from sbs_reporter import SBSReporter
+from meteor_detector import MeteorDetector
 
 
 class SunsetScheduler:
@@ -40,7 +41,8 @@ class SunsetScheduler:
         self.drive_uploader = DriveUploader()
         self.email_notifier = EmailNotifier()
         self.sbs_reporter = SBSReporter()
-        
+        self.meteor_detector = MeteorDetector()
+
         # State tracking
         self.running = False
         self.current_capture_thread = None
@@ -383,6 +385,92 @@ class SunsetScheduler:
         except Exception as e:
             self.logger.error(f"Error during daily maintenance: {e}")
 
+    def run_overnight_meteor_scan(self):
+        """Scan overnight camera recordings for meteor events"""
+        self.logger.info("Starting overnight meteor scan...")
+
+        try:
+            # Determine overnight window using actual sunset/sunrise times
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+
+            # Get configurable offsets
+            sunset_offset = self.config.get('meteor.sunset_offset_minutes', 30)
+            sunrise_offset = self.config.get('meteor.sunrise_offset_minutes', 30)
+
+            # Get yesterday's sunset time (with offset to ensure darkness)
+            sunset_time = self.sunset_calc.get_sunset_time(yesterday) + timedelta(minutes=sunset_offset)
+
+            # Get today's sunrise time (with offset to avoid daylight)
+            sunrise_time = self.sunset_calc.get_sunrise_time(today) - timedelta(minutes=sunrise_offset)
+
+            self.logger.info(f"Scanning overnight recordings from {sunset_time.strftime('%Y-%m-%d %H:%M')} to {sunrise_time.strftime('%Y-%m-%d %H:%M')}")
+
+            # Use MeteorDetector to scan the overnight window
+            meteors_found = self.meteor_detector.search_date_range(
+                start_date=yesterday,
+                end_date=today,
+                start_time=sunset_time,
+                end_time=sunrise_time
+            )
+
+            if meteors_found:
+                self.logger.info(f"Overnight meteor scan complete: {len(meteors_found)} meteor(s) detected!")
+
+                # Upload meteor clips to Google Drive (if enabled)
+                drive_enabled = self.config.get('drive.enabled', False)
+                uploaded_clips = []
+
+                if drive_enabled:
+                    self.logger.info("Uploading meteor clips to Google Drive...")
+                    for meteor in meteors_found:
+                        clip_path = Path(meteor['clip_path'])
+                        if clip_path.exists():
+                            try:
+                                result = self.drive_uploader.upload_meteor_clip(clip_path, meteor)
+                                if result:
+                                    uploaded_clips.append({
+                                        'filename': result['filename'],
+                                        'web_link': result.get('web_link', 'N/A')
+                                    })
+                                    self.logger.info(f"Uploaded {result['filename']} to Drive")
+                            except Exception as e:
+                                self.logger.error(f"Failed to upload {clip_path.name}: {e}")
+
+                # Send email notification with meteor details
+                meteor_details = []
+                for i, meteor in enumerate(meteors_found):
+                    detail = {
+                        'Clip': Path(meteor['clip_path']).name,
+                        'Time': meteor.get('timestamp', 'Unknown'),
+                        'Duration': f"{meteor.get('duration_frames', 0)} frames",
+                        'Brightness': meteor.get('peak_brightness', 0)
+                    }
+
+                    # Add Drive link if uploaded
+                    if i < len(uploaded_clips):
+                        detail['Drive Link'] = uploaded_clips[i].get('web_link', 'N/A')
+
+                    meteor_details.append(detail)
+
+                self.email_notifier.send_notification(
+                    f"Meteor Detection Report - {today.strftime('%Y-%m-%d')}",
+                    f"Overnight meteor scan detected {len(meteors_found)} meteor event(s).",
+                    {
+                        'Scan Period': f"{yesterday} 20:00 to {today} 06:00",
+                        'Meteors Found': len(meteors_found),
+                        'Uploaded to Drive': len(uploaded_clips) if drive_enabled else 'Disabled',
+                        'Details': json.dumps(meteor_details, indent=2)
+                    }
+                )
+            else:
+                self.logger.info("Overnight meteor scan complete: No meteors detected")
+
+        except Exception as e:
+            self.logger.error(f"Error during overnight meteor scan: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+
     def _attempt_historical_recovery(self):
         """Attempt to recover yesterday's footage if live capture failed"""
         try:
@@ -592,7 +680,13 @@ class SunsetScheduler:
         
         # Schedule daily maintenance at 6 AM (includes token refresh and cleanup)
         schedule.every().day.at("06:00").do(self.daily_maintenance)
-        
+
+        # Schedule overnight meteor scan at 7 AM (after maintenance completes)
+        meteor_enabled = self.config.get('meteor.enabled', False)
+        if meteor_enabled:
+            schedule.every().day.at("07:00").do(self.run_overnight_meteor_scan)
+            self.logger.info("Overnight meteor scan scheduled for 07:00")
+
         # Also schedule a backup weekly cleanup (in case daily maintenance fails)
         schedule.every().sunday.at("02:00").do(self.cleanup_old_files)
         
