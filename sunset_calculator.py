@@ -55,10 +55,10 @@ class SunsetCalculator:
     def get_sunset_time(self, target_date: date) -> datetime:
         """
         Get sunset time for a specific date
-        
+
         Args:
             target_date: Date to calculate sunset for
-            
+
         Returns:
             Sunset datetime in local timezone
         """
@@ -67,18 +67,47 @@ class SunsetCalculator:
             # This ensures Astral calculates for the correct local date
             local_midnight = datetime.combine(target_date, datetime.min.time())
             local_midnight = local_midnight.replace(tzinfo=self.timezone)
-            
+
             s = sun(self.location.observer, date=local_midnight)
             sunset_utc = s['sunset']
-            
+
             # Convert to local timezone
             sunset_local = sunset_utc.astimezone(self.timezone)
-            
+
             self.logger.debug(f"Sunset on {target_date}: {sunset_local.strftime('%H:%M:%S %Z')}")
             return sunset_local
-            
+
         except Exception as e:
             self.logger.error(f"Failed to calculate sunset for {target_date}: {e}")
+            raise
+
+    def get_sunrise_time(self, target_date: date) -> datetime:
+        """
+        Get sunrise time for a specific date
+
+        Args:
+            target_date: Date to calculate sunrise for
+
+        Returns:
+            Sunrise datetime in local timezone
+        """
+        try:
+            # Create a datetime at midnight in the local timezone for the target date
+            # This ensures Astral calculates for the correct local date
+            local_midnight = datetime.combine(target_date, datetime.min.time())
+            local_midnight = local_midnight.replace(tzinfo=self.timezone)
+
+            s = sun(self.location.observer, date=local_midnight)
+            sunrise_utc = s['sunrise']
+
+            # Convert to local timezone
+            sunrise_local = sunrise_utc.astimezone(self.timezone)
+
+            self.logger.debug(f"Sunrise on {target_date}: {sunrise_local.strftime('%H:%M:%S %Z')}")
+            return sunrise_local
+
+        except Exception as e:
+            self.logger.error(f"Failed to calculate sunrise for {target_date}: {e}")
             raise
             
     def get_capture_window(self, target_date: date) -> Tuple[datetime, datetime]:

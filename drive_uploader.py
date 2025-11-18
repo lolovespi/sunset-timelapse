@@ -6,7 +6,7 @@ Handles uploading timelapse videos to Google Drive for cloud storage
 import logging
 import os
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -457,31 +457,32 @@ class DriveUploader:
     def cleanup_old_files(self, days_old: Optional[int] = None) -> int:
         """
         Clean up old files from Drive
-        
+
         Args:
             days_old: Delete files older than this many days (uses config default if None)
-            
+
         Returns:
             Number of files deleted
         """
         if not self.authenticate():
             return 0
-        
+
         days_old = days_old or self.cleanup_after_days
-        cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # Make cutoff_date timezone-aware to match Google Drive API timestamps
+        cutoff_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         cutoff_date = cutoff_date.replace(day=cutoff_date.day - days_old)
-        
+
         try:
             # Find old files in the upload folder
             query = f"parents='{self.folder_id}' and trashed=false"
             results = self.service.files().list(q=query, fields='files(id, name, createdTime)').execute()
             files = results.get('files', [])
-            
+
             deleted_count = 0
-            
+
             for file in files:
                 file_date = datetime.fromisoformat(file['createdTime'].replace('Z', '+00:00'))
-                
+
                 if file_date < cutoff_date:
                     try:
                         self.service.files().delete(fileId=file['id']).execute()
