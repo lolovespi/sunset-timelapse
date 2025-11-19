@@ -106,6 +106,7 @@ class MeteorDetector:
         self.max_frames = self.config.get('meteor.max_frames', 30)
         self.min_linearity = self.config.get('meteor.min_linearity', 0.85)
         self.min_velocity = self.config.get('meteor.min_velocity', 5.0)
+        self.max_velocity = self.config.get('meteor.max_velocity', 25.0)
         self.max_gap_frames = self.config.get('meteor.max_gap_frames', 2)
         self.clip_padding_seconds = self.config.get('meteor.clip_padding_seconds', 3)
 
@@ -594,6 +595,10 @@ class MeteorDetector:
             self.logger.debug(f"Rejected: too slow ({velocity:.2f} px/frame)")
             return False
 
+        if velocity > self.max_velocity:
+            self.logger.debug(f"Rejected: too fast ({velocity:.2f} px/frame, likely aircraft)")
+            return False
+
         # Check for consistent motion (no blinking)
         if not candidate.has_consistent_motion():
             self.logger.debug("Rejected: inconsistent motion (likely aircraft)")
@@ -749,6 +754,12 @@ class MeteorDetector:
                                     # 3. Require minimum streak length (reject noise/hot pixels)
                                     if major_axis < 15:
                                         self.logger.debug(f"Rejected single-frame: too short ({major_axis:.0f}px)")
+                                        continue
+
+                                    # 4. Reject extremely long streaks (likely aircraft)
+                                    # For single-frame, streak length ~= velocity in px/frame
+                                    if major_axis > self.max_velocity:
+                                        self.logger.debug(f"Rejected single-frame: too fast ({major_axis:.0f}px, likely aircraft)")
                                         continue
 
                                     # Calculate angle from horizontal for logging
