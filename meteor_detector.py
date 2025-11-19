@@ -617,24 +617,20 @@ class MeteorDetector:
                     self.logger.debug(f"Rejected: too horizontal ({angle_from_horizontal:.1f}° from horizontal, likely aircraft)")
                     return False
 
-        # Additional airplane rejection: check brightness variance
-        # Planes have steady lights, meteors fade/brighten as they burn
-        # Only apply this check for longer tracks (>= 5 frames)
-        # Short meteors (< 5 frames) may have consistent brightness but are still legitimate
-        if len(candidate.brightness_values) >= 5:
-            brightness_array = np.array(candidate.brightness_values)
-            brightness_std = np.std(brightness_array)
-            brightness_mean = np.mean(brightness_array)
-
-            # Calculate coefficient of variation (normalized variance)
-            if brightness_mean > 0:
-                brightness_cv = brightness_std / brightness_mean
-
-                # Reject if brightness is too steady (< 25% variation = likely plane/satellite)
-                # Increased from 15% to 25% to catch planes with some brightness variation
-                if brightness_cv < 0.25:
-                    self.logger.debug(f"Rejected: brightness too steady (CV={brightness_cv:.3f}, likely aircraft/satellite)")
-                    return False
+        # Brightness variance check DISABLED
+        # This check was rejecting legitimate meteors with steady brightness
+        # (confirmed Nov 15 meteor had CV=0.006, well below the 0.25 threshold)
+        # Airplanes are already filtered by: max_frames (30), motion angle (>30°), min_velocity
+        #
+        # Original logic (now disabled):
+        # if len(candidate.brightness_values) >= 5:
+        #     brightness_array = np.array(candidate.brightness_values)
+        #     brightness_std = np.std(brightness_array)
+        #     brightness_mean = np.mean(brightness_array)
+        #     if brightness_mean > 0:
+        #         brightness_cv = brightness_std / brightness_mean
+        #         if brightness_cv < 0.25:
+        #             return False
 
         # Additional check: frame duration vs distance traveled (acceleration test)
         # Meteors maintain constant velocity, planes can appear to accelerate/decelerate
@@ -736,32 +732,29 @@ class MeteorDetector:
                                 mean_brightness = cv2.mean(gray, mask=mask_roi)[0]
 
                                 if mean_brightness > self.min_brightness_threshold:
-                                    # Single-frame detections are disabled due to high false positive rate
-                                    # Most single-frame streaks are airplanes, satellites, or insects
-                                    # True meteors are better detected via multi-frame tracking
-                                    self.logger.debug(f"Rejected single-frame: single-frame detection disabled "
-                                                    f"(brightness={mean_brightness:.0f}, aspect={aspect_ratio:.1f}, len={major_axis:.0f}px)")
-                                    continue
+                                    # Single-frame detections re-enabled with strict filters
+                                    # Key insight: Meteors are BRIEF (1-6 frames), airplanes are LONG (30+ frames)
+                                    # Let max_frames filter reject long airplane tracks
 
-                                    # # ALTERNATIVE: Uncomment to re-enable with very strict filters
-                                    # # 1. Reject bright objects (airplanes, insects near IR)
-                                    # if mean_brightness > 235:
-                                    #     self.logger.debug(f"Rejected single-frame: too bright ({mean_brightness:.0f})")
-                                    #     continue
-                                    #
-                                    # # 2. Reject extreme aspect ratios (motion blur artifacts)
-                                    # if aspect_ratio > 15 or aspect_ratio < 3:
-                                    #     self.logger.debug(f"Rejected single-frame: aspect ratio {aspect_ratio:.1f}")
-                                    #     continue
-                                    #
-                                    # # 3. Only accept diagonal meteors (50-80° from horizontal)
-                                    # # Rejects horizontal planes and vertical insects/satellites
-                                    # angle_from_horizontal = min(abs(angle), abs(angle - 180))
-                                    # if angle_from_horizontal > 90:
-                                    #     angle_from_horizontal = 180 - angle_from_horizontal
-                                    # if angle_from_horizontal < 50 or angle_from_horizontal > 80:
-                                    #     self.logger.debug(f"Rejected single-frame: angle {angle_from_horizontal:.1f}°")
-                                    #     continue
+                                    # 1. Reject extremely bright objects (insects very close to IR)
+                                    if mean_brightness > 245:
+                                        self.logger.debug(f"Rejected single-frame: too bright ({mean_brightness:.0f}, likely insect)")
+                                        continue
+
+                                    # 2. Reject extreme aspect ratios (motion blur artifacts)
+                                    if aspect_ratio > 20 or aspect_ratio < 3:
+                                        self.logger.debug(f"Rejected single-frame: aspect ratio {aspect_ratio:.1f}")
+                                        continue
+
+                                    # 3. Require minimum streak length (reject noise/hot pixels)
+                                    if major_axis < 15:
+                                        self.logger.debug(f"Rejected single-frame: too short ({major_axis:.0f}px)")
+                                        continue
+
+                                    # Calculate angle from horizontal for logging
+                                    # cv2.fitEllipse returns angle 0-180°, where 0° and 180° are horizontal
+                                    # We want angle from horizontal (0° = horizontal, 90° = vertical)
+                                    angle_from_horizontal = min(angle, 180 - angle)
 
                                     self.logger.info(f"Single-frame meteor detected! "
                                                    f"Frame {frame_num}, y={cy}, aspect_ratio={aspect_ratio:.1f}, "
@@ -816,15 +809,33 @@ class MeteorDetector:
 
         groups.append(current_group)
 
-        # Select best detection from each group (longest streak with highest brightness)
+        # Convert grouped single-frame detections into multi-frame meteor representations
         consolidated = []
         for group in groups:
-            # Score each detection: prioritize streak length and brightness
-            best = max(group, key=lambda d: d['length'] * d['brightness'])
+            if len(group) == 1:
+                # Single isolated frame - keep as single-frame detection
+                self.logger.debug(f"Single-frame detection at frame {group[0]['frame_num']}")
+                consolidated.append(group[0])
+            else:
+                # Multiple frames - create multi-frame meteor representation
+                # This allows us to track meteors detected across multiple frames
+                start_frame = group[0]['frame_num']
+                end_frame = group[-1]['frame_num']
 
-            self.logger.debug(f"Consolidated {len(group)} detections (frames {group[0]['frame_num']}-{group[-1]['frame_num']}) "
-                            f"into single event at frame {best['frame_num']}")
-            consolidated.append(best)
+                # Store all frame data for multi-frame clip extraction
+                meteor_data = {
+                    'frame_num': start_frame,  # Use first frame as reference
+                    'start_frame': start_frame,
+                    'end_frame': end_frame,
+                    'frame_count': len(group),
+                    'timestamp': group[0]['timestamp'],
+                    'frames': group,  # Store all individual frame detections
+                    'is_multi_frame_group': True,  # Flag to indicate this is grouped
+                }
+
+                self.logger.debug(f"Consolidated {len(group)} detections (frames {start_frame}-{end_frame}) "
+                                f"into multi-frame meteor ({len(group)} frames)")
+                consolidated.append(meteor_data)
 
         return consolidated
 
@@ -968,16 +979,30 @@ class MeteorDetector:
     def _extract_single_frame_clip(self, source_video: Path, sf_meteor: Dict,
                                     fps: float, target_date: date) -> Optional[Dict]:
         """
-        Extract a video clip containing a single-frame meteor streak
+        Extract a video clip containing a single-frame meteor streak OR
+        a multi-frame meteor created from grouped single-frame detections
 
         Returns meteor metadata including clip path
         """
 
+        # Check if this is a multi-frame grouped detection
+        is_multi_frame = sf_meteor.get('is_multi_frame_group', False)
+
         # Calculate clip boundaries with padding
         padding_frames = int(self.clip_padding_seconds * fps)
-        frame_num = sf_meteor['frame_num']
-        start_frame = max(0, frame_num - padding_frames)
-        end_frame = frame_num + padding_frames
+
+        if is_multi_frame:
+            # Multi-frame meteor: use actual start/end frames
+            frame_num = sf_meteor['start_frame']
+            meteor_start = sf_meteor['start_frame']
+            meteor_end = sf_meteor['end_frame']
+            start_frame = max(0, meteor_start - padding_frames)
+            end_frame = meteor_end + padding_frames
+        else:
+            # Single-frame meteor
+            frame_num = sf_meteor['frame_num']
+            start_frame = max(0, frame_num - padding_frames)
+            end_frame = frame_num + padding_frames
 
         # Generate output filename with timezone-aware timestamp
         clip_time = sf_meteor['timestamp']
@@ -1019,25 +1044,82 @@ class MeteorDetector:
 
             out.release()
 
-            self.logger.info(f"Extracted single-frame meteor clip: {filename}")
+            # Log extraction type
+            if is_multi_frame:
+                self.logger.info(f"Extracted multi-frame grouped meteor clip: {filename}")
+            else:
+                self.logger.info(f"Extracted single-frame meteor clip: {filename}")
 
-            # Create metadata
-            meteor_info = {
-                'clip_path': str(output_path),
-                'filename': filename,
-                'timestamp': sf_meteor['timestamp'].isoformat(),
-                'duration_frames': 1,
-                'duration_seconds': 1 / fps,
-                'max_brightness': sf_meteor['brightness'],
-                'linearity_score': 1.0,  # Single frame = perfect linearity
-                'velocity': sf_meteor['length'],  # Length is velocity proxy for single frame
-                'aspect_ratio': sf_meteor['aspect_ratio'],
-                'streak_length_px': sf_meteor['length'],
-                'streak_angle': sf_meteor['angle'],
-                'path_start': sf_meteor['centroid'],
-                'path_end': sf_meteor['centroid'],
-                'detection_type': 'single_frame'
-            }
+            # Create metadata based on detection type
+            if is_multi_frame:
+                # Calculate proper multi-frame metadata
+                frames = sf_meteor['frames']
+                frame_count = len(frames)
+
+                # Calculate velocity and linearity from path
+                positions = [f['centroid'] for f in frames]
+                max_brightness = max(f['brightness'] for f in frames)
+
+                # Calculate linearity (how straight the path is)
+                if len(positions) >= 2:
+                    # Use numpy polyfit to measure linearity
+                    x_coords = np.array([p[0] for p in positions])
+                    y_coords = np.array([p[1] for p in positions])
+
+                    # Fit line and calculate R² score
+                    if np.std(x_coords) > 0:
+                        coeffs = np.polyfit(x_coords, y_coords, 1)
+                        y_fit = np.polyval(coeffs, x_coords)
+                        ss_res = np.sum((y_coords - y_fit) ** 2)
+                        ss_tot = np.sum((y_coords - np.mean(y_coords)) ** 2)
+                        linearity = 1 - (ss_res / (ss_tot + 1e-6))  # R²
+                    else:
+                        linearity = 1.0  # Vertical line
+
+                    # Calculate velocity (average px/frame)
+                    total_distance = np.sqrt((positions[-1][0] - positions[0][0])**2 +
+                                            (positions[-1][1] - positions[0][1])**2)
+                    # Use actual number of detected frames, not frame number span
+                    # (there may be gaps where meteor wasn't detected)
+                    frame_span = len(positions) - 1
+                    velocity = total_distance / max(frame_span, 1)
+                else:
+                    linearity = 1.0
+                    velocity = frames[0]['length']
+
+                meteor_info = {
+                    'clip_path': str(output_path),
+                    'filename': filename,
+                    'timestamp': sf_meteor['timestamp'].isoformat(),
+                    'duration_frames': frame_count,
+                    'duration_seconds': frame_count / fps,
+                    'max_brightness': max_brightness,
+                    'linearity_score': linearity,
+                    'velocity': velocity,
+                    'path_start': positions[0],
+                    'path_end': positions[-1],
+                    'start_frame': meteor_start,
+                    'end_frame': meteor_end,
+                    'detection_type': 'multi_frame_grouped'
+                }
+            else:
+                # Single-frame meteor metadata
+                meteor_info = {
+                    'clip_path': str(output_path),
+                    'filename': filename,
+                    'timestamp': sf_meteor['timestamp'].isoformat(),
+                    'duration_frames': 1,
+                    'duration_seconds': 1 / fps,
+                    'max_brightness': sf_meteor['brightness'],
+                    'linearity_score': 1.0,  # Single frame = perfect linearity
+                    'velocity': sf_meteor['length'],  # Length is velocity proxy for single frame
+                    'aspect_ratio': sf_meteor['aspect_ratio'],
+                    'streak_length_px': sf_meteor['length'],
+                    'streak_angle': sf_meteor['angle'],
+                    'path_start': sf_meteor['centroid'],
+                    'path_end': sf_meteor['centroid'],
+                    'detection_type': 'single_frame'
+                }
 
             # Save metadata alongside clip
             metadata_path = output_path.with_suffix('.json')
