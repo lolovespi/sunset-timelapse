@@ -619,7 +619,9 @@ class MeteorDetector:
 
         # Additional airplane rejection: check brightness variance
         # Planes have steady lights, meteors fade/brighten as they burn
-        if len(candidate.brightness_values) >= 3:
+        # Only apply this check for longer tracks (>= 5 frames)
+        # Short meteors (< 5 frames) may have consistent brightness but are still legitimate
+        if len(candidate.brightness_values) >= 5:
             brightness_array = np.array(candidate.brightness_values)
             brightness_std = np.std(brightness_array)
             brightness_mean = np.mean(brightness_array)
