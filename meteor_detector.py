@@ -734,32 +734,32 @@ class MeteorDetector:
                                 mean_brightness = cv2.mean(gray, mask=mask_roi)[0]
 
                                 if mean_brightness > self.min_brightness_threshold:
-                                    # Additional filters to reject insects/artifacts
+                                    # Single-frame detections are disabled due to high false positive rate
+                                    # Most single-frame streaks are airplanes, satellites, or insects
+                                    # True meteors are better detected via multi-frame tracking
+                                    self.logger.debug(f"Rejected single-frame: single-frame detection disabled "
+                                                    f"(brightness={mean_brightness:.0f}, aspect={aspect_ratio:.1f}, len={major_axis:.0f}px)")
+                                    continue
 
-                                    # 1. Reject extremely bright objects (insects near IR illuminator)
-                                    # Meteors are bright but not blindingly so
-                                    if mean_brightness > 250:
-                                        self.logger.debug(f"Rejected single-frame: too bright ({mean_brightness:.0f}, likely insect near IR)")
-                                        continue
-
-                                    # 2. Reject very elongated streaks (motion blur artifacts, not meteors)
-                                    # Meteors should have aspect ratio 3-20, not 100+
-                                    if aspect_ratio > 20:
-                                        self.logger.debug(f"Rejected single-frame: extreme aspect ratio ({aspect_ratio:.1f}, likely artifact)")
-                                        continue
-
-                                    # 3. Reject near-horizontal streaks (insects/planes move horizontally)
-                                    # Angle from fitEllipse is 0-180, need to convert to angle from horizontal
-                                    # OpenCV angle: 0° = horizontal, 90° = vertical
-                                    angle_from_horizontal = min(abs(angle), abs(angle - 180))
-                                    if angle_from_horizontal > 90:
-                                        angle_from_horizontal = 180 - angle_from_horizontal
-
-                                    # Reject if angle is too horizontal (< 35° from horizontal)
-                                    # Meteors typically have steeper entry angles
-                                    if angle_from_horizontal < 35:
-                                        self.logger.debug(f"Rejected single-frame: too horizontal ({angle_from_horizontal:.1f}° from horizontal, likely insect/plane)")
-                                        continue
+                                    # # ALTERNATIVE: Uncomment to re-enable with very strict filters
+                                    # # 1. Reject bright objects (airplanes, insects near IR)
+                                    # if mean_brightness > 235:
+                                    #     self.logger.debug(f"Rejected single-frame: too bright ({mean_brightness:.0f})")
+                                    #     continue
+                                    #
+                                    # # 2. Reject extreme aspect ratios (motion blur artifacts)
+                                    # if aspect_ratio > 15 or aspect_ratio < 3:
+                                    #     self.logger.debug(f"Rejected single-frame: aspect ratio {aspect_ratio:.1f}")
+                                    #     continue
+                                    #
+                                    # # 3. Only accept diagonal meteors (50-80° from horizontal)
+                                    # # Rejects horizontal planes and vertical insects/satellites
+                                    # angle_from_horizontal = min(abs(angle), abs(angle - 180))
+                                    # if angle_from_horizontal > 90:
+                                    #     angle_from_horizontal = 180 - angle_from_horizontal
+                                    # if angle_from_horizontal < 50 or angle_from_horizontal > 80:
+                                    #     self.logger.debug(f"Rejected single-frame: angle {angle_from_horizontal:.1f}°")
+                                    #     continue
 
                                     self.logger.info(f"Single-frame meteor detected! "
                                                    f"Frame {frame_num}, y={cy}, aspect_ratio={aspect_ratio:.1f}, "
