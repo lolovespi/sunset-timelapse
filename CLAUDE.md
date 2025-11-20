@@ -121,6 +121,84 @@ Images are organized by date and automatically cleaned up after 7 days. Videos a
 - Camera passwords and Google credentials are never logged
 - Configuration validation prevents missing security settings
 
+## Meteor Detection System
+
+### Overview
+The meteor detection system analyzes historical camera recordings to identify and extract meteor events using OpenCV-based computer vision algorithms.
+
+### Detection Algorithm
+- **Multi-frame tracking**: Tracks bright objects across consecutive frames for sustained meteors
+- **Single-frame detection**: Identifies fast-moving streaks in individual frames
+- **Validation filters**: Multiple criteria to distinguish meteors from false positives
+
+### False Positive Filtering
+
+**Max Velocity Filter** (config: `meteor.max_velocity`, default: 25.0 px/frame)
+- Rejects fast-moving aircraft and satellites
+- Based on confirmed meteor velocity analysis: 6.39 - 20.33 px/frame
+- Threshold provides safety margin while filtering extreme velocities (26+ px/frame)
+
+**Linearity Score** (config: `meteor.linearity_threshold`, default: 0.95)
+- Validates meteor paths follow straight trajectories
+- Rejects erratic movements (insects, birds, debris)
+
+**Sky Region Filtering** (config: `meteor.sky_region_top/bottom`)
+- Focuses detection on upper portion of frame where meteors occur
+- Reduces ground-based false positives
+
+### Platform-Specific Behavior
+
+**Desktop (Mac/Windows/Linux x86)**
+- Uses parallel processing with ProcessPoolExecutor (3 workers)
+- Significantly faster for bulk historical scans
+- Automatically detected via platform checks
+
+**Raspberry Pi (ARM/aarch64)**
+- Uses sequential processing to prevent resource exhaustion
+- Detected via multiple methods:
+  - Platform machine check (`'arm'` or `'aarch'` in platform.machine())
+  - Raspberry Pi device tree file check (`/proc/device-tree/model` exists)
+- Prevents worker process spawning that could overwhelm Pi resources
+
+### Known Issues
+
+**Performance Bottleneck in Parallel Processing**
+- Each worker process re-initializes heavy objects for every video
+- Causes ~36x slowdown compared to expected parallel performance
+- Issue: ProcessPoolExecutor workers don't share state
+- Impact: 173 videos takes ~12 hours instead of ~20 minutes
+- Workaround: Use targeted time windows instead of full-night scans
+- Fix needed: Refactor worker architecture to reuse initialized objects
+
+### Configuration Example
+```yaml
+meteor:
+  enabled: true
+  linearity_threshold: 0.95
+  max_velocity: 25.0              # Max 25 px/frame to reject aircraft
+  sky_region_top: 0.0             # Top 0% of frame
+  sky_region_bottom: 0.5          # Bottom 50% of frame
+```
+
+### Output Structure
+Detected meteors are saved to `data/meteors/` with:
+- **Video clip** (`.mp4`): Extracted frames showing the meteor
+- **Metadata** (`.json`): Detection parameters, timestamps, velocity, linearity score
+
+Example metadata:
+```json
+{
+  "timestamp": "2024-11-15T18:53:24.123456",
+  "duration_frames": 6,
+  "duration_seconds": 0.45,
+  "max_brightness": 255.0,
+  "linearity_score": 0.958,
+  "velocity": 9.05,
+  "detection_type": "multi_frame",
+  "source_recording": "RecM04_20241115_185320_185521.mp4"
+}
+```
+
 ## Testing Strategy
 
 Always run system validation before deployment:
