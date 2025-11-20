@@ -226,8 +226,17 @@ class MeteorDetector:
         self.logger.info(f"Processing {len(nighttime_recordings)} nighttime recordings")
 
         # Use parallel processing on Mac/desktop, sequential on Raspberry Pi
-        is_desktop = platform.system() in ['Darwin', 'Windows'] or \
-                     (platform.system() == 'Linux' and 'arm' not in platform.machine().lower())
+        # Check for ARM/low-power systems via multiple methods
+        machine = platform.machine().lower()
+        is_arm = 'arm' in machine or 'aarch' in machine
+        is_raspberry_pi = os.path.exists('/proc/device-tree/model')
+
+        # Only enable parallel processing on Mac/Windows or powerful Linux desktops
+        is_desktop = (platform.system() in ['Darwin', 'Windows']) and not is_raspberry_pi
+
+        # For Linux, only enable parallel if NOT ARM and NOT Raspberry Pi
+        if platform.system() == 'Linux':
+            is_desktop = not is_arm and not is_raspberry_pi
 
         if is_desktop and len(nighttime_recordings) > 1:
             # Parallel processing for desktop (Mac/Windows/Linux x86)
