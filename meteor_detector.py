@@ -476,6 +476,10 @@ class MeteorDetector:
             if meteor_info:
                 confirmed_meteors.append(meteor_info)
 
+        # Aircraft filter: detect multiple detections that form a linear path across the frame
+        # Aircraft produce multiple single-frame detections as they cross the field of view
+        confirmed_meteors = self._filter_aircraft_detections(confirmed_meteors)
+
         self.logger.info(f"Found {len(confirmed_meteors)} meteors in {video_path.name}")
         return confirmed_meteors
 
@@ -694,6 +698,78 @@ class MeteorDetector:
         self.logger.info(f"Valid meteor candidate: {candidate.frame_count} frames, "
                         f"linearity={linearity:.2f}, velocity={velocity:.2f}")
         return True
+
+    def _filter_aircraft_detections(self, meteors: List[Dict]) -> List[Dict]:
+        """
+        Filter out aircraft detections from meteor list.
+
+        Aircraft produce multiple single-frame detections that form a linear path
+        across the field of view over the duration of a video (~2 minutes).
+
+        Detection criteria:
+        - 3+ single-frame detections in same video
+        - X positions form a monotonic sequence (increasing or decreasing)
+        - Detections span significant portion of frame width
+
+        Args:
+            meteors: List of meteor detection dictionaries
+
+        Returns:
+            Filtered list with aircraft detections removed
+        """
+        if len(meteors) < 3:
+            return meteors
+
+        # Get single-frame detections only (aircraft appear as single-frame streaks)
+        single_frame = [m for m in meteors if m.get('detection_type') == 'single_frame']
+        multi_frame = [m for m in meteors if m.get('detection_type') != 'single_frame']
+
+        if len(single_frame) < 3:
+            return meteors
+
+        # Sort by timestamp/frame number to check spatial progression
+        single_frame_sorted = sorted(single_frame, key=lambda m: m.get('timestamp', ''))
+
+        # Extract X positions (path_start[0] for single-frame detections)
+        x_positions = []
+        for m in single_frame_sorted:
+            if m.get('path_start'):
+                x_positions.append(m['path_start'][0])
+            elif m.get('centroid'):
+                x_positions.append(m['centroid'][0])
+            else:
+                x_positions.append(None)
+
+        # Filter out None values
+        valid_positions = [(i, x) for i, x in enumerate(x_positions) if x is not None]
+
+        if len(valid_positions) < 3:
+            return meteors
+
+        # Check if positions are monotonically increasing or decreasing (aircraft pattern)
+        x_vals = [x for _, x in valid_positions]
+
+        # Check monotonic increasing (west to east)
+        is_increasing = all(x_vals[i] <= x_vals[i+1] for i in range(len(x_vals)-1))
+        # Check monotonic decreasing (east to west)
+        is_decreasing = all(x_vals[i] >= x_vals[i+1] for i in range(len(x_vals)-1))
+
+        # Check if span is significant (at least 30% of frame width, assume 1920px)
+        x_span = max(x_vals) - min(x_vals)
+        frame_width = 1920  # Assumed frame width
+        span_ratio = x_span / frame_width
+
+        if (is_increasing or is_decreasing) and span_ratio > 0.3:
+            # This looks like an aircraft traversing the frame
+            self.logger.warning(
+                f"Aircraft detected: {len(single_frame)} single-frame detections "
+                f"forming {'west-to-east' if is_increasing else 'east-to-west'} path "
+                f"(span: {span_ratio*100:.0f}% of frame). Rejecting all."
+            )
+            # Return only multi-frame detections (aircraft rarely produce these)
+            return multi_frame
+
+        return meteors
 
     def _detect_single_frame_meteors(self, gray: np.ndarray, fg_mask: np.ndarray,
                                       frame_num: int, timestamp: datetime) -> List[Dict]:
