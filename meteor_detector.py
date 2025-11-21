@@ -298,30 +298,126 @@ class MeteorDetector:
 
     def _process_recordings_parallel(self, recordings: List[Dict],
                                     target_date: date, max_workers: int) -> List[Dict]:
-        """Process recordings in parallel (for Mac/desktop)"""
+        """
+        Process recordings in parallel (for Mac/desktop).
+
+        Uses a two-phase approach:
+        1. Download videos sequentially (camera has connection limits)
+        2. Analyze videos in parallel with lightweight workers
+        """
+        import time
+
         detected_meteors = []
 
-        # Use ProcessPoolExecutor for true parallelism
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all recording analysis tasks
-            future_to_recording = {
-                executor.submit(
-                    _analyze_recording_worker,
-                    recording,
-                    target_date
-                ): recording for recording in recordings
-            }
+        # Create a persistent temp directory for all downloads
+        temp_base = Path(tempfile.mkdtemp(prefix='meteor_scan_'))
+        downloaded_videos = []
 
-            # Collect results as they complete
-            for future in as_completed(future_to_recording):
-                recording = future_to_recording[future]
-                try:
-                    meteors = future.result()
-                    if meteors:
-                        detected_meteors.extend(meteors)
-                        self.logger.info(f"Found {len(meteors)} meteor(s) in {recording.get('name', 'unknown')}")
-                except Exception as e:
-                    self.logger.error(f"Error processing {recording.get('name', 'unknown')}: {e}")
+        # Prepare config dict for workers (avoid re-reading config files)
+        config_dict = {
+            'min_brightness_threshold': self.min_brightness_threshold,
+            'min_area': self.min_area,
+            'max_area': self.max_area,
+            'min_frames': self.min_frames,
+            'max_frames': self.max_frames,
+            'min_linearity': self.min_linearity,
+            'min_velocity': self.min_velocity,
+            'max_velocity': self.max_velocity,
+            'max_gap_frames': self.max_gap_frames,
+            'clip_padding_seconds': self.clip_padding_seconds,
+            'sky_region_top': self.sky_region_top,
+            'sky_region_bottom': self.sky_region_bottom,
+            'meteor_dir': str(self.meteor_dir),
+            'timezone': self.timezone_str,
+        }
+
+        try:
+            # Phase 1: Download all videos (sequential - camera connection limits)
+            self.logger.info(f"Phase 1: Downloading {len(recordings)} videos...")
+            download_start = time.time()
+
+            for i, recording in enumerate(recordings):
+                temp_path = temp_base / recording['name']
+                temp_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Download with retry logic
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        if self.historical.download_recording(recording, temp_path):
+                            downloaded_videos.append({
+                                'path': str(temp_path),
+                                'recording': recording
+                            })
+                            break
+                        elif attempt < max_retries - 1:
+                            time.sleep(1 * (attempt + 1))
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            time.sleep(1 * (attempt + 1))
+
+                # Progress logging
+                if (i + 1) % 10 == 0:
+                    self.logger.info(f"Downloaded {i + 1}/{len(recordings)} videos...")
+
+            download_time = time.time() - download_start
+            self.logger.info(f"Phase 1 complete: Downloaded {len(downloaded_videos)} videos in {download_time:.1f}s")
+
+            if not downloaded_videos:
+                self.logger.warning("No videos downloaded successfully")
+                return []
+
+            # Phase 2: Analyze videos in parallel
+            self.logger.info(f"Phase 2: Analyzing {len(downloaded_videos)} videos with {max_workers} workers...")
+            analysis_start = time.time()
+
+            # Prepare work items
+            work_items = [
+                (
+                    v['path'],
+                    target_date,
+                    v['recording'].get('start_time'),
+                    v['recording'].get('name', 'unknown'),
+                    config_dict
+                )
+                for v in downloaded_videos
+            ]
+
+            # Use ProcessPoolExecutor with lightweight workers
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                future_to_video = {
+                    executor.submit(_analyze_video_worker, item): item
+                    for item in work_items
+                }
+
+                completed = 0
+                for future in as_completed(future_to_video):
+                    item = future_to_video[future]
+                    video_name = item[3]  # recording_name is 4th element
+                    try:
+                        meteors = future.result()
+                        if meteors:
+                            detected_meteors.extend(meteors)
+                            self.logger.info(f"Found {len(meteors)} meteor(s) in {video_name}")
+                    except Exception as e:
+                        self.logger.error(f"Error processing {video_name}: {e}")
+
+                    completed += 1
+                    if completed % 20 == 0:
+                        self.logger.info(f"Analyzed {completed}/{len(downloaded_videos)} videos...")
+
+            analysis_time = time.time() - analysis_start
+            total_time = time.time() - download_start
+            self.logger.info(f"Phase 2 complete: Analyzed {len(downloaded_videos)} videos in {analysis_time:.1f}s")
+            self.logger.info(f"Total time: {total_time:.1f}s ({download_time:.1f}s download + {analysis_time:.1f}s analysis)")
+
+        finally:
+            # Clean up temp directory
+            import shutil
+            try:
+                shutil.rmtree(temp_base)
+            except Exception as e:
+                self.logger.warning(f"Failed to clean up temp directory: {e}")
 
         return detected_meteors
 
@@ -1312,54 +1408,704 @@ class MeteorDetector:
         return stats
 
 
-# Worker function for parallel processing (must be at module level for multiprocessing)
-def _analyze_recording_worker(recording: Dict, target_date: date) -> List[Dict]:
+# Lightweight worker function for parallel processing (module level for multiprocessing)
+def _analyze_video_worker(args: Tuple) -> List[Dict]:
     """
-    Worker function for parallel video analysis
+    Lightweight worker function for parallel video analysis.
 
-    This must be at module level for ProcessPoolExecutor to pickle it.
-    Creates its own MeteorDetector instance to avoid sharing state.
+    Takes a pre-downloaded video path and config, avoiding heavy object initialization.
+    This is called by ProcessPoolExecutor with videos already downloaded.
+
+    Args:
+        args: Tuple of (video_path, target_date, recording_start, recording_name, config_dict)
+
+    Returns:
+        List of detected meteor events
     """
-    import time
+    video_path_str, target_date, recording_start, recording_name, config_dict = args
+    video_path = Path(video_path_str)
 
-    # Each worker creates its own detector instance
-    detector = MeteorDetector()
-    detected_meteors = []
+    # Create lightweight detector with pre-loaded config
+    detector = _LightweightMeteorDetector(config_dict)
 
-    # Download recording to temp location with retry logic for 503 errors
-    max_retries = 3
-    retry_delay = 2  # seconds
+    # Analyze video
+    meteors = detector.analyze_video(video_path, target_date, recording_start)
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir) / recording['name']
+    # Add source info to each meteor
+    for meteor in meteors:
+        meteor['source_recording'] = recording_name
+        meteor['date'] = target_date.isoformat()
 
-        download_success = False
-        for attempt in range(max_retries):
-            try:
-                if detector.historical.download_recording(recording, temp_path):
-                    download_success = True
+    return meteors
+
+
+class _LightweightMeteorDetector:
+    """
+    Minimal meteor detector for worker processes.
+
+    Avoids initializing HistoricalRetrieval, SunsetCalculator, YouTubeUploader, etc.
+    Only contains the video analysis logic needed for detecting meteors.
+    """
+
+    def __init__(self, config_dict: Dict):
+        """Initialize with pre-loaded config dictionary (no file I/O)"""
+        self.logger = logging.getLogger(__name__)
+
+        # Detection parameters from config
+        self.min_brightness_threshold = config_dict.get('min_brightness_threshold', 200)
+        self.min_area = config_dict.get('min_area', 10)
+        self.max_area = config_dict.get('max_area', 5000)
+        self.min_frames = config_dict.get('min_frames', 3)
+        self.max_frames = config_dict.get('max_frames', 30)
+        self.min_linearity = config_dict.get('min_linearity', 0.85)
+        self.min_velocity = config_dict.get('min_velocity', 5.0)
+        self.max_velocity = config_dict.get('max_velocity', 25.0)
+        self.max_gap_frames = config_dict.get('max_gap_frames', 2)
+        self.clip_padding_seconds = config_dict.get('clip_padding_seconds', 3)
+        self.sky_region_top = config_dict.get('sky_region_top', 0.0)
+        self.sky_region_bottom = config_dict.get('sky_region_bottom', 0.5)
+
+        # Storage path for meteor clips
+        self.meteor_dir = Path(config_dict.get('meteor_dir', 'data/meteors'))
+        self.meteor_dir.mkdir(parents=True, exist_ok=True)
+
+        # Timezone for timestamps
+        self.timezone_str = config_dict.get('timezone', 'America/Chicago')
+
+    def _to_local_timezone(self, dt: datetime) -> datetime:
+        """Convert datetime to local timezone"""
+        local_tz = ZoneInfo(self.timezone_str)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=local_tz)
+        return dt.astimezone(local_tz)
+
+    def analyze_video(self, video_path: Path, target_date: date,
+                     recording_start: Optional[datetime] = None) -> List[Dict]:
+        """Analyze a video file for meteor events (core detection logic only)"""
+        self.logger.info(f"Analyzing video: {video_path.name}")
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            self.logger.error(f"Could not open video: {video_path}")
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Background subtractor for motion detection
+        bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=100, varThreshold=50, detectShadows=False
+        )
+
+        active_candidates: List[MeteorCandidate] = []
+        confirmed_meteors: List[Dict] = []
+        single_frame_detections: List[Dict] = []
+
+        frame_num = 0
+        prev_gray = None
+
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
                     break
+
+                # Calculate timestamp
+                if recording_start:
+                    timestamp = recording_start + timedelta(seconds=frame_num / fps)
                 else:
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
-            except Exception as e:
-                if '503' in str(e) or 'connection' in str(e).lower():
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                    timestamp = datetime.combine(target_date, datetime.min.time()) + \
+                               timedelta(seconds=frame_num / fps)
+
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                fg_mask = bg_subtractor.apply(frame)
+
+                # Detect bright moving objects
+                detections = self._detect_bright_moving_objects(gray, fg_mask, prev_gray)
+
+                # Detect single-frame meteors
+                single_frame = self._detect_single_frame_meteors(gray, fg_mask, frame_num, timestamp)
+                single_frame_detections.extend(single_frame)
+
+                # Update candidates
+                active_candidates = self._update_candidates(
+                    active_candidates, detections, frame_num, timestamp
+                )
+
+                # Check completed tracks
+                for candidate in list(active_candidates):
+                    if frame_num - candidate.end_frame > self.max_gap_frames:
+                        if self._validate_meteor_candidate(candidate):
+                            meteor_info = self._extract_meteor_clip(
+                                video_path, candidate, fps, target_date
+                            )
+                            if meteor_info:
+                                confirmed_meteors.append(meteor_info)
+                        active_candidates.remove(candidate)
+
+                prev_gray = gray
+                frame_num += 1
+        finally:
+            cap.release()
+
+        # Check remaining candidates
+        for candidate in active_candidates:
+            if self._validate_meteor_candidate(candidate):
+                meteor_info = self._extract_meteor_clip(video_path, candidate, fps, target_date)
+                if meteor_info:
+                    confirmed_meteors.append(meteor_info)
+
+        # Deduplicate multi-frame detections
+        if len(confirmed_meteors) > 1:
+            confirmed_meteors = self._deduplicate_multiframe_detections(confirmed_meteors)
+
+        # Consolidate single-frame detections
+        consolidated_sf = self._consolidate_single_frame_detections(single_frame_detections)
+        self.logger.info(f"Consolidated {len(single_frame_detections)} single-frame detections into {len(consolidated_sf)} events")
+
+        # Filter overlapping single-frame detections
+        non_overlapping_sf = []
+        for sf_meteor in consolidated_sf:
+            sf_frame = sf_meteor['frame_num']
+            overlaps = False
+            for mf_meteor in confirmed_meteors:
+                mf_start = mf_meteor.get('start_frame', 0)
+                mf_end = mf_meteor.get('end_frame', 0)
+                if mf_start > 0 and mf_end > 0:
+                    if mf_start - 30 <= sf_frame <= mf_end + 30:
+                        overlaps = True
+                        break
+            if not overlaps:
+                non_overlapping_sf.append(sf_meteor)
+
+        # Extract clips for non-overlapping single-frame detections
+        for sf_meteor in non_overlapping_sf:
+            meteor_info = self._extract_single_frame_clip(video_path, sf_meteor, fps, target_date)
+            if meteor_info:
+                confirmed_meteors.append(meteor_info)
+
+        # Apply aircraft filter
+        confirmed_meteors = self._filter_aircraft_detections(confirmed_meteors)
+
+        self.logger.info(f"Found {len(confirmed_meteors)} meteors in {video_path.name}")
+        return confirmed_meteors
+
+    def _detect_bright_moving_objects(self, gray: np.ndarray, fg_mask: np.ndarray,
+                                       prev_gray: Optional[np.ndarray]) -> List[Dict]:
+        """Detect bright objects that are moving"""
+        detections = []
+
+        frame_height = gray.shape[0]
+        sky_top_px = int(frame_height * self.sky_region_top)
+        sky_bottom_px = int(frame_height * self.sky_region_bottom)
+
+        _, bright_mask = cv2.threshold(gray, self.min_brightness_threshold, 255, cv2.THRESH_BINARY)
+        combined_mask = cv2.bitwise_and(bright_mask, fg_mask)
+
+        kernel = np.ones((3, 3), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if self.min_area <= area <= self.max_area:
+                M = cv2.moments(contour)
+                if M['m00'] > 0:
+                    cx = int(M['m10'] / M['m00'])
+                    cy = int(M['m01'] / M['m00'])
+                    if cy < sky_top_px or cy > sky_bottom_px:
+                        continue
+                    brightness = float(gray[cy, cx])
+                    detections.append({
+                        'centroid': (cx, cy),
+                        'brightness': brightness,
+                        'area': area
+                    })
+
+        return detections
+
+    def _update_candidates(self, candidates: List[MeteorCandidate],
+                           detections: List[Dict], frame_num: int,
+                           timestamp: datetime) -> List[MeteorCandidate]:
+        """Update meteor candidates with new frame detections"""
+        used_detections = set()
+
+        for candidate in candidates:
+            if not candidate.positions:
+                continue
+            last_pos = candidate.positions[-1]
+            best_match = None
+            best_distance = float('inf')
+
+            for i, detection in enumerate(detections):
+                if i in used_detections:
+                    continue
+                dx = detection['centroid'][0] - last_pos[0]
+                dy = detection['centroid'][1] - last_pos[1]
+                distance = np.sqrt(dx*dx + dy*dy)
+                max_distance = self.min_velocity * 3 * (frame_num - candidate.end_frame)
+                if distance < max_distance and distance < best_distance:
+                    best_match = i
+                    best_distance = distance
+
+            if best_match is not None:
+                detection = detections[best_match]
+                candidate.add_detection(frame_num, detection['centroid'],
+                                       detection['brightness'], timestamp)
+                used_detections.add(best_match)
+
+        for i, detection in enumerate(detections):
+            if i not in used_detections:
+                new_candidate = MeteorCandidate(frame_num, timestamp)
+                new_candidate.add_detection(frame_num, detection['centroid'],
+                                           detection['brightness'], timestamp)
+                candidates.append(new_candidate)
+
+        return candidates
+
+    def _validate_meteor_candidate(self, candidate: MeteorCandidate) -> bool:
+        """Validate if a candidate is actually a meteor"""
+        if candidate.frame_count < self.min_frames:
+            return False
+        if candidate.frame_count > self.max_frames:
+            return False
+
+        linearity = candidate.get_linearity_score()
+        if linearity < self.min_linearity:
+            return False
+
+        velocity = candidate.get_velocity()
+        if velocity < self.min_velocity:
+            return False
+        if velocity > self.max_velocity:
+            return False
+
+        if not candidate.has_consistent_motion():
+            return False
+
+        # Check motion angle
+        if len(candidate.positions) >= 2:
+            start_pos = candidate.positions[0]
+            end_pos = candidate.positions[-1]
+            dx = abs(end_pos[0] - start_pos[0])
+            dy = abs(end_pos[1] - start_pos[1])
+            if dx > 0:
+                angle_from_horizontal = np.degrees(np.arctan(dy / dx))
+                if angle_from_horizontal < 30:
+                    return False
+
+        # Velocity consistency check
+        if len(candidate.positions) >= 5:
+            mid_point = len(candidate.positions) // 2
+            first_half_start = candidate.positions[0]
+            first_half_end = candidate.positions[mid_point]
+            first_half_dist = np.sqrt((first_half_end[0] - first_half_start[0])**2 +
+                                     (first_half_end[1] - first_half_start[1])**2)
+            first_half_frames = mid_point
+
+            second_half_start = candidate.positions[mid_point]
+            second_half_end = candidate.positions[-1]
+            second_half_dist = np.sqrt((second_half_end[0] - second_half_start[0])**2 +
+                                       (second_half_end[1] - second_half_start[1])**2)
+            second_half_frames = len(candidate.positions) - mid_point
+
+            if first_half_frames > 0 and second_half_frames > 0:
+                first_velocity = first_half_dist / first_half_frames
+                second_velocity = second_half_dist / second_half_frames
+                if first_velocity > 0:
+                    velocity_ratio = second_velocity / first_velocity
+                    if velocity_ratio < 0.7 or velocity_ratio > 1.3:
+                        return False
+
+        self.logger.info(f"Valid meteor candidate: {candidate.frame_count} frames, "
+                        f"linearity={linearity:.2f}, velocity={velocity:.2f}")
+        return True
+
+    def _detect_single_frame_meteors(self, gray: np.ndarray, fg_mask: np.ndarray,
+                                      frame_num: int, timestamp: datetime) -> List[Dict]:
+        """Detect single-frame meteor streaks based on elongation"""
+        single_frame_meteors = []
+
+        frame_height = gray.shape[0]
+        sky_top_px = int(frame_height * self.sky_region_top)
+        sky_bottom_px = int(frame_height * self.sky_region_bottom)
+
+        _, bright_mask = cv2.threshold(gray, self.min_brightness_threshold, 255, cv2.THRESH_BINARY)
+        combined_mask = cv2.bitwise_and(bright_mask, fg_mask)
+
+        kernel = np.ones((3, 3), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_area or area > self.max_area:
+                continue
+
+            if len(contour) >= 5:
+                try:
+                    ellipse = cv2.fitEllipse(contour)
+                    (center, axes, angle) = ellipse
+                    major_axis = max(axes)
+                    minor_axis = min(axes)
+
+                    if minor_axis > 0:
+                        aspect_ratio = major_axis / minor_axis
+
+                        if aspect_ratio > 3.0 and major_axis > 20:
+                            M = cv2.moments(contour)
+                            if M['m00'] > 0:
+                                cx = int(M['m10'] / M['m00'])
+                                cy = int(M['m01'] / M['m00'])
+
+                                if cy < sky_top_px or cy > sky_bottom_px:
+                                    continue
+
+                                mask_roi = np.zeros_like(gray)
+                                cv2.drawContours(mask_roi, [contour], 0, 255, -1)
+                                mean_brightness = cv2.mean(gray, mask=mask_roi)[0]
+
+                                if mean_brightness > self.min_brightness_threshold:
+                                    # Reject extreme brightness (insects)
+                                    if mean_brightness > 245:
+                                        continue
+                                    # Reject extreme aspect ratios
+                                    if aspect_ratio > 20 or aspect_ratio < 3:
+                                        continue
+                                    # Require minimum streak length
+                                    if major_axis < 15:
+                                        continue
+                                    # Reject too-fast streaks (aircraft)
+                                    if major_axis > self.max_velocity:
+                                        continue
+
+                                    self.logger.info(f"Single-frame meteor detected! "
+                                                   f"Frame {frame_num}, y={cy}, aspect_ratio={aspect_ratio:.1f}")
+
+                                    single_frame_meteors.append({
+                                        'frame_num': frame_num,
+                                        'timestamp': timestamp,
+                                        'centroid': (cx, cy),
+                                        'brightness': mean_brightness,
+                                        'aspect_ratio': aspect_ratio,
+                                        'length': major_axis,
+                                        'angle': angle,
+                                        'area': area
+                                    })
+                except cv2.error:
+                    pass
+
+        return single_frame_meteors
+
+    def _consolidate_single_frame_detections(self, detections: List[Dict]) -> List[Dict]:
+        """Group single-frame detections that are close together as same meteor event"""
+        if not detections:
+            return []
+
+        sorted_dets = sorted(detections, key=lambda x: x['frame_num'])
+        groups = []
+        current_group = [sorted_dets[0]]
+
+        for det in sorted_dets[1:]:
+            last_det = current_group[-1]
+            frame_gap = det['frame_num'] - last_det['frame_num']
+            cy_diff = abs(det['centroid'][1] - last_det['centroid'][1])
+
+            if frame_gap <= 15 and cy_diff < 100:
+                current_group.append(det)
+            else:
+                groups.append(current_group)
+                current_group = [det]
+
+        groups.append(current_group)
+
+        consolidated = []
+        for group in groups:
+            if len(group) == 1:
+                consolidated.append(group[0])
+            else:
+                start_frame = group[0]['frame_num']
+                end_frame = group[-1]['frame_num']
+                meteor_data = {
+                    'frame_num': start_frame,
+                    'start_frame': start_frame,
+                    'end_frame': end_frame,
+                    'frame_count': len(group),
+                    'timestamp': group[0]['timestamp'],
+                    'frames': group,
+                    'is_multi_frame_group': True,
+                }
+                consolidated.append(meteor_data)
+
+        return consolidated
+
+    def _deduplicate_multiframe_detections(self, meteors: List[Dict]) -> List[Dict]:
+        """Remove duplicate multi-frame detections of same meteor event"""
+        if len(meteors) <= 1:
+            return meteors
+
+        sorted_meteors = sorted(meteors, key=lambda m: m.get('start_frame', 0))
+        deduplicated = []
+        current_group = [sorted_meteors[0]]
+
+        for meteor in sorted_meteors[1:]:
+            last_meteor = current_group[-1]
+            last_end = last_meteor.get('end_frame', 0)
+            current_start = meteor.get('start_frame', 0)
+
+            if current_start - last_end <= 30:
+                current_group.append(meteor)
+            else:
+                best = max(current_group, key=lambda m: m['duration_frames'])
+                deduplicated.append(best)
+                for m in current_group:
+                    if m != best:
+                        clip_path = Path(m['clip_path'])
+                        if clip_path.exists():
+                            clip_path.unlink()
+                        json_path = clip_path.with_suffix('.json')
+                        if json_path.exists():
+                            json_path.unlink()
+                current_group = [meteor]
+
+        if current_group:
+            best = max(current_group, key=lambda m: m['duration_frames'])
+            deduplicated.append(best)
+            for m in current_group:
+                if m != best:
+                    clip_path = Path(m['clip_path'])
+                    if clip_path.exists():
+                        clip_path.unlink()
+                    json_path = clip_path.with_suffix('.json')
+                    if json_path.exists():
+                        json_path.unlink()
+
+        return deduplicated
+
+    def _filter_aircraft_detections(self, meteors: List[Dict]) -> List[Dict]:
+        """Filter out aircraft detections from meteor list"""
+        if len(meteors) < 3:
+            return meteors
+
+        single_frame = [m for m in meteors if m.get('detection_type') == 'single_frame']
+        multi_frame = [m for m in meteors if m.get('detection_type') != 'single_frame']
+
+        if len(single_frame) < 3:
+            return meteors
+
+        single_frame_sorted = sorted(single_frame, key=lambda m: m.get('timestamp', ''))
+
+        x_positions = []
+        for m in single_frame_sorted:
+            if m.get('path_start'):
+                x_positions.append(m['path_start'][0])
+            elif m.get('centroid'):
+                x_positions.append(m['centroid'][0])
+            else:
+                x_positions.append(None)
+
+        valid_positions = [(i, x) for i, x in enumerate(x_positions) if x is not None]
+        if len(valid_positions) < 3:
+            return meteors
+
+        x_vals = [x for _, x in valid_positions]
+        is_increasing = all(x_vals[i] <= x_vals[i+1] for i in range(len(x_vals)-1))
+        is_decreasing = all(x_vals[i] >= x_vals[i+1] for i in range(len(x_vals)-1))
+
+        x_span = max(x_vals) - min(x_vals)
+        frame_width = 1920
+        span_ratio = x_span / frame_width
+
+        if (is_increasing or is_decreasing) and span_ratio > 0.3:
+            self.logger.warning(
+                f"Aircraft detected: {len(single_frame)} single-frame detections "
+                f"forming {'west-to-east' if is_increasing else 'east-to-west'} path "
+                f"(span: {span_ratio*100:.0f}% of frame). Rejecting all."
+            )
+            return multi_frame
+
+        return meteors
+
+    def _extract_meteor_clip(self, source_video: Path, candidate: MeteorCandidate,
+                             fps: float, target_date: date) -> Optional[Dict]:
+        """Extract a video clip containing the meteor event"""
+        padding_frames = int(self.clip_padding_seconds * fps)
+        start_frame = max(0, candidate.start_frame - padding_frames)
+        end_frame = candidate.end_frame + padding_frames
+
+        clip_time = candidate.start_time
+        local_time = self._to_local_timezone(clip_time)
+        tz_abbr = local_time.strftime('%Z')
+        filename = f"meteor-{local_time.strftime('%m-%d-%Y-%I-%M-%S-%p')}-{tz_abbr}.mp4"
+        output_path = self.meteor_dir / filename
+
+        cap = cv2.VideoCapture(str(source_video))
+        if not cap.isOpened():
+            return None
+
+        try:
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+            for frame_idx in range(start_frame, end_frame + 1):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                out.write(frame)
+
+            out.release()
+
+            meteor_info = {
+                'clip_path': str(output_path),
+                'filename': filename,
+                'timestamp': candidate.start_time.isoformat(),
+                'duration_frames': candidate.frame_count,
+                'duration_seconds': candidate.frame_count / fps,
+                'max_brightness': candidate.max_brightness,
+                'linearity_score': candidate.get_linearity_score(),
+                'velocity': candidate.get_velocity(),
+                'path_start': candidate.positions[0] if candidate.positions else None,
+                'path_end': candidate.positions[-1] if candidate.positions else None,
+                'start_frame': candidate.start_frame,
+                'end_frame': candidate.end_frame,
+                'detection_type': 'multi_frame'
+            }
+
+            metadata_path = output_path.with_suffix('.json')
+            with open(metadata_path, 'w') as f:
+                json.dump(meteor_info, f, indent=2, default=str)
+
+            return meteor_info
+        except Exception as e:
+            self.logger.error(f"Error extracting meteor clip: {e}")
+            return None
+        finally:
+            cap.release()
+
+    def _extract_single_frame_clip(self, source_video: Path, sf_meteor: Dict,
+                                    fps: float, target_date: date) -> Optional[Dict]:
+        """Extract a video clip containing a single-frame meteor streak"""
+        is_multi_frame = sf_meteor.get('is_multi_frame_group', False)
+        padding_frames = int(self.clip_padding_seconds * fps)
+
+        if is_multi_frame:
+            frame_num = sf_meteor['start_frame']
+            meteor_start = sf_meteor['start_frame']
+            meteor_end = sf_meteor['end_frame']
+            start_frame = max(0, meteor_start - padding_frames)
+            end_frame = meteor_end + padding_frames
+        else:
+            frame_num = sf_meteor['frame_num']
+            start_frame = max(0, frame_num - padding_frames)
+            end_frame = frame_num + padding_frames
+
+        clip_time = sf_meteor['timestamp']
+        local_time = self._to_local_timezone(clip_time)
+        tz_abbr = local_time.strftime('%Z')
+        filename = f"meteor-{local_time.strftime('%m-%d-%Y-%I-%M-%S-%p')}-{tz_abbr}.mp4"
+        output_path = self.meteor_dir / filename
+
+        if output_path.exists():
+            filename = f"meteor-{local_time.strftime('%m-%d-%Y-%I-%M-%S-%p')}-{tz_abbr}-f{frame_num}.mp4"
+            output_path = self.meteor_dir / filename
+
+        cap = cv2.VideoCapture(str(source_video))
+        if not cap.isOpened():
+            return None
+
+        try:
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+            for frame_idx in range(start_frame, end_frame + 1):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                out.write(frame)
+
+            out.release()
+
+            if is_multi_frame:
+                frames = sf_meteor['frames']
+                frame_count = len(frames)
+                positions = [f['centroid'] for f in frames]
+                max_brightness = max(f['brightness'] for f in frames)
+
+                if len(positions) >= 2:
+                    x_coords = np.array([p[0] for p in positions])
+                    y_coords = np.array([p[1] for p in positions])
+                    if np.std(x_coords) > 0:
+                        coeffs = np.polyfit(x_coords, y_coords, 1)
+                        y_fit = np.polyval(coeffs, x_coords)
+                        ss_res = np.sum((y_coords - y_fit) ** 2)
+                        ss_tot = np.sum((y_coords - np.mean(y_coords)) ** 2)
+                        linearity = 1 - (ss_res / (ss_tot + 1e-6))
+                    else:
+                        linearity = 1.0
+                    total_distance = np.sqrt((positions[-1][0] - positions[0][0])**2 +
+                                            (positions[-1][1] - positions[0][1])**2)
+                    frame_span = len(positions) - 1
+                    velocity = total_distance / max(frame_span, 1)
                 else:
-                    break  # Don't retry non-503 errors
+                    linearity = 1.0
+                    velocity = frames[0]['length']
 
-        if download_success:
-            # Analyze video for meteors
-            recording_start = recording.get('start_time')
-            meteors = detector._analyze_video(temp_path, target_date, recording_start)
+                meteor_info = {
+                    'clip_path': str(output_path),
+                    'filename': filename,
+                    'timestamp': sf_meteor['timestamp'].isoformat(),
+                    'duration_frames': frame_count,
+                    'duration_seconds': frame_count / fps,
+                    'max_brightness': max_brightness,
+                    'linearity_score': linearity,
+                    'velocity': velocity,
+                    'path_start': positions[0],
+                    'path_end': positions[-1],
+                    'start_frame': meteor_start,
+                    'end_frame': meteor_end,
+                    'detection_type': 'multi_frame_grouped'
+                }
+            else:
+                meteor_info = {
+                    'clip_path': str(output_path),
+                    'filename': filename,
+                    'timestamp': sf_meteor['timestamp'].isoformat(),
+                    'duration_frames': 1,
+                    'duration_seconds': 1 / fps,
+                    'max_brightness': sf_meteor['brightness'],
+                    'linearity_score': 1.0,
+                    'velocity': sf_meteor['length'],
+                    'aspect_ratio': sf_meteor['aspect_ratio'],
+                    'streak_length_px': sf_meteor['length'],
+                    'streak_angle': sf_meteor['angle'],
+                    'path_start': sf_meteor['centroid'],
+                    'path_end': sf_meteor['centroid'],
+                    'detection_type': 'single_frame'
+                }
 
-            for meteor in meteors:
-                meteor['source_recording'] = recording.get('name', 'unknown')
-                meteor['date'] = target_date.isoformat()
-                detected_meteors.append(meteor)
+            metadata_path = output_path.with_suffix('.json')
+            with open(metadata_path, 'w') as f:
+                json.dump(meteor_info, f, indent=2, default=str)
 
-    return detected_meteors
+            return meteor_info
+        except Exception as e:
+            self.logger.error(f"Error extracting single-frame meteor clip: {e}")
+            return None
+        finally:
+            cap.release()
 
 
 def search_meteors(start_date: date, end_date: date,
