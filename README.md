@@ -601,6 +601,31 @@ The automated meteor detection system uses computer vision to scan overnight cam
 6. **Google Drive Backup**: Meteor clips automatically uploaded to separate "meteors" folder
 7. **Email Notifications**: Get alerts when meteors are detected with clip details and Drive links
 
+#### False Positive Filtering
+
+The meteor detection system includes multiple filters to distinguish real meteors from aircraft, satellites, and other false positives:
+
+**Max Velocity Filter** (New in Nov 2024)
+- Rejects fast-moving aircraft and satellites exceeding 25 px/frame
+- Based on confirmed meteor velocity analysis: 6.39 - 20.33 px/frame
+- Provides safety margin while filtering extreme velocities (26+ px/frame)
+- Significantly reduces false positive rate
+
+**Linearity Score Filter**
+- Validates meteor paths follow straight trajectories
+- Rejects erratic movements (insects, birds, debris)
+- Score threshold: 0.85-0.95 (configurable)
+
+**Sky Region Filtering**
+- Focuses detection on upper portion of frame where meteors occur
+- Reduces ground-based false positives
+- Configurable sky region boundaries
+
+**Platform-Specific Processing**
+- Desktop (Mac/Windows/x86 Linux): Parallel processing with 3 workers for faster scanning
+- Raspberry Pi (ARM/aarch64): Sequential processing to prevent resource exhaustion
+- Automatic platform detection via multiple methods
+
 #### Meteor Configuration
 
 ```yaml
@@ -616,12 +641,17 @@ meteor:
 
   # Track validation
   min_frames: 3                      # Minimum frames to confirm meteor
-  min_linearity: 0.85                # Path linearity score (0-1)
+  linearity_threshold: 0.95          # Path linearity score (0-1)
   min_velocity: 5.0                  # Minimum velocity in pixels/frame
+  max_velocity: 25.0                 # Maximum velocity (reject aircraft/satellites)
 
   # Storage
   retention_days: 30                 # Keep meteor clips for 30 days
 ```
+
+#### Known Performance Issue
+
+**Parallel Processing Bottleneck**: The current ProcessPoolExecutor implementation re-initializes heavy objects for every video, causing ~36x slowdown (12 hours instead of 20 minutes for full-night scans). Workaround: Use targeted time windows (e.g., 1-2 hour windows) instead of full-night scans. This is a known issue documented in [CLAUDE.md](CLAUDE.md) for future refactoring.
 
 #### Meteor Detection Commands
 

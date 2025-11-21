@@ -176,21 +176,35 @@ class MeteorDetector:
                             end_time: Optional[datetime] = None) -> List[Dict]:
         """Search a single date for meteor events"""
 
-        # Default to nighttime hours if not specified (use actual sunset/sunrise times)
+        # Default to nighttime hours if not specified
+        # Use astronomical twilight (sun 18° below horizon) for truly dark sky
         if start_time is None:
-            # Start after sunset to ensure full darkness (configurable offset)
-            sunset_offset = self.config.get('meteor.sunset_offset_minutes', 30)
-            sunset_time = self.sunset_calc.get_sunset_time(target_date)
-            start_time = sunset_time + timedelta(minutes=sunset_offset)
-            self.logger.info(f"Using sunset-based start time: {start_time.strftime('%H:%M')} (sunset at {sunset_time.strftime('%H:%M')}, +{sunset_offset}min)")
+            use_astronomical = self.config.get('meteor.use_astronomical_twilight', True)
+            if use_astronomical:
+                # Use astronomical dusk - when sky is truly dark
+                start_time = self.sunset_calc.get_astronomical_dusk(target_date)
+                self.logger.info(f"Using astronomical dusk start time: {start_time.strftime('%H:%M')} (truly dark sky)")
+            else:
+                # Fall back to sunset offset
+                sunset_offset = self.config.get('meteor.sunset_offset_minutes', 90)
+                sunset_time = self.sunset_calc.get_sunset_time(target_date)
+                start_time = sunset_time + timedelta(minutes=sunset_offset)
+                self.logger.info(f"Using sunset-based start time: {start_time.strftime('%H:%M')} (sunset at {sunset_time.strftime('%H:%M')}, +{sunset_offset}min)")
 
         if end_time is None:
-            # End before sunrise next day (configurable offset)
-            sunrise_offset = self.config.get('meteor.sunrise_offset_minutes', 30)
-            next_day = target_date + timedelta(days=1)
-            sunrise_time = self.sunset_calc.get_sunrise_time(next_day)
-            end_time = sunrise_time - timedelta(minutes=sunrise_offset)
-            self.logger.info(f"Using sunrise-based end time: {end_time.strftime('%H:%M')} (sunrise at {sunrise_time.strftime('%H:%M')}, -{sunrise_offset}min)")
+            use_astronomical = self.config.get('meteor.use_astronomical_twilight', True)
+            if use_astronomical:
+                # Use astronomical dawn next day - when sky starts to brighten
+                next_day = target_date + timedelta(days=1)
+                end_time = self.sunset_calc.get_astronomical_dawn(next_day)
+                self.logger.info(f"Using astronomical dawn end time: {end_time.strftime('%H:%M')} (sky starts brightening)")
+            else:
+                # Fall back to sunrise offset
+                sunrise_offset = self.config.get('meteor.sunrise_offset_minutes', 90)
+                next_day = target_date + timedelta(days=1)
+                sunrise_time = self.sunset_calc.get_sunrise_time(next_day)
+                end_time = sunrise_time - timedelta(minutes=sunrise_offset)
+                self.logger.info(f"Using sunrise-based end time: {end_time.strftime('%H:%M')} (sunrise at {sunrise_time.strftime('%H:%M')}, -{sunrise_offset}min)")
 
         # Get recordings from camera for this time window
         recordings = self.historical.get_camera_recordings(target_date, target_date)

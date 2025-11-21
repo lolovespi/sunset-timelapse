@@ -109,6 +109,66 @@ class SunsetCalculator:
         except Exception as e:
             self.logger.error(f"Failed to calculate sunrise for {target_date}: {e}")
             raise
+
+    def get_astronomical_dusk(self, target_date: date) -> datetime:
+        """
+        Get astronomical dusk time (sun 18° below horizon) for a specific date.
+        This is when the sky is truly dark and suitable for meteor observation.
+
+        Args:
+            target_date: Date to calculate astronomical dusk for
+
+        Returns:
+            Astronomical dusk datetime in local timezone
+        """
+        try:
+            from astral.sun import dusk
+
+            local_midnight = datetime.combine(target_date, datetime.min.time())
+            local_midnight = local_midnight.replace(tzinfo=self.timezone)
+
+            # depression=18 gives astronomical twilight (truly dark sky)
+            dusk_utc = dusk(self.location.observer, date=local_midnight, depression=18)
+
+            # Convert to local timezone
+            dusk_local = dusk_utc.astimezone(self.timezone)
+
+            self.logger.debug(f"Astronomical dusk on {target_date}: {dusk_local.strftime('%H:%M:%S %Z')}")
+            return dusk_local
+
+        except Exception as e:
+            self.logger.error(f"Failed to calculate astronomical dusk for {target_date}: {e}")
+            raise
+
+    def get_astronomical_dawn(self, target_date: date) -> datetime:
+        """
+        Get astronomical dawn time (sun 18° below horizon) for a specific date.
+        This is when the sky starts to brighten, ending meteor observation window.
+
+        Args:
+            target_date: Date to calculate astronomical dawn for
+
+        Returns:
+            Astronomical dawn datetime in local timezone
+        """
+        try:
+            from astral.sun import dawn
+
+            local_midnight = datetime.combine(target_date, datetime.min.time())
+            local_midnight = local_midnight.replace(tzinfo=self.timezone)
+
+            # depression=18 gives astronomical twilight (truly dark sky)
+            dawn_utc = dawn(self.location.observer, date=local_midnight, depression=18)
+
+            # Convert to local timezone
+            dawn_local = dawn_utc.astimezone(self.timezone)
+
+            self.logger.debug(f"Astronomical dawn on {target_date}: {dawn_local.strftime('%H:%M:%S %Z')}")
+            return dawn_local
+
+        except Exception as e:
+            self.logger.error(f"Failed to calculate astronomical dawn for {target_date}: {e}")
+            raise
             
     def get_capture_window(self, target_date: date) -> Tuple[datetime, datetime]:
         """
