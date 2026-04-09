@@ -336,10 +336,15 @@ class SunsetScheduler:
             self.logger.info("Attempting fallback upload without SBS enhancements")
             return self.upload_to_youtube(video_path, target_date, actual_start_time, actual_end_time, is_test)
             
-    def daily_maintenance(self):
-        """Perform daily maintenance tasks including token refresh and file cleanup"""
+    def daily_maintenance(self, skip_historical_recovery=False):
+        """
+        Perform daily maintenance tasks including token refresh and file cleanup
+
+        Args:
+            skip_historical_recovery: If True, skip the historical recovery check (used when called from evening workflow)
+        """
         self.logger.info("Starting daily maintenance tasks...")
-        
+
         try:
             # Task 1: Refresh YouTube token proactively, then check health
             self.logger.info("Refreshing YouTube token proactively...")
@@ -357,10 +362,14 @@ class SunsetScheduler:
                 token_healthy = self.youtube_uploader.check_token_health_and_alert()
                 if not token_healthy:
                     self.logger.error("✗ YouTube token has issues - check logs and email notifications")
-            
+
             # Task 2: Check for failed captures and attempt historical retrieval
-            self.logger.info("Checking for failed captures from yesterday...")
-            self._attempt_historical_recovery()
+            # Skip this in the evening to avoid duplicate processing
+            if not skip_historical_recovery:
+                self.logger.info("Checking for failed captures from yesterday...")
+                self._attempt_historical_recovery()
+            else:
+                self.logger.debug("Skipping historical recovery check (evening workflow)")
 
             # Task 3: Clean up old SBS analysis data
             self.logger.info("Cleaning up old SBS analysis data...")
@@ -667,7 +676,8 @@ class SunsetScheduler:
                 )
                 
             # Step 5: Daily maintenance (includes token refresh, SBS cleanup, and file cleanup)
-            self.daily_maintenance()
+            # Skip historical recovery in evening - it already runs in morning maintenance
+            self.daily_maintenance(skip_historical_recovery=True)
             
             self.logger.info(f"Daily workflow completed for {target_date}")
             return True
@@ -723,19 +733,30 @@ class SunsetScheduler:
             self.logger.info(f"Next scheduled job: {next_job.next_run}")
             
         # Main scheduler loop
+        last_heartbeat_hour = -1
         while self.running and not self.shutdown_requested:
             try:
                 # Run scheduled jobs
                 schedule.run_pending()
-                
+
                 # Check if we need to reschedule (daily at midnight)
                 now = datetime.now()
                 if now.hour == 0 and now.minute == 0:
                     self.schedule_daily_capture()
-                    
+
+                # Hourly heartbeat log to detect hangs
+                if now.hour != last_heartbeat_hour:
+                    last_heartbeat_hour = now.hour
+                    jobs = schedule.get_jobs()
+                    if jobs:
+                        next_job = min(jobs, key=lambda x: x.next_run)
+                        self.logger.info(f"Scheduler heartbeat - next job: {next_job.next_run}")
+                    else:
+                        self.logger.warning("Scheduler heartbeat - NO jobs scheduled!")
+
                 # Sleep for a minute before checking again
                 time.sleep(60)
-                
+
             except KeyboardInterrupt:
                 self.logger.info("Keyboard interrupt received")
                 break
