@@ -112,6 +112,17 @@ sbs:
   save_chunk_summaries: true
   performance_logging: true
 
+# Tempest weather station settings
+tempest:
+  enabled: false
+  station_id: ""          # Your Tempest station ID (numeric)
+  # API token set via TEMPEST_API_TOKEN env var (see .env.example)
+  api_token: "${TEMPEST_API_TOKEN}"
+  udp:
+    enabled: true
+    port: 50222
+    timeout_seconds: 300
+
 # Meteor detection settings
 meteor:
   enabled: false                 # Set to true to enable automatic overnight meteor scanning at 7 AM

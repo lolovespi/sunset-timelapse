@@ -23,6 +23,8 @@ from drive_uploader import DriveUploader
 from email_notifier import EmailNotifier
 from sbs_reporter import SBSReporter
 from meteor_detector import MeteorDetector
+from tempest_api import TempestAPI
+from visual_analyzer import VisualAnalyzer
 
 
 class SunsetScheduler:
@@ -42,6 +44,8 @@ class SunsetScheduler:
         self.email_notifier = EmailNotifier()
         self.sbs_reporter = SBSReporter()
         self.meteor_detector = MeteorDetector()
+        self.tempest_api = TempestAPI()
+        self.visual_analyzer = VisualAnalyzer()
 
         # State tracking
         self.running = False
@@ -651,7 +655,31 @@ class SunsetScheduler:
                             'sbs_grade': sbs_report['summary']['quality_grade'],
                             'sbs_analysis': sbs_report['summary']
                         })
-                    
+
+                    # Add weather conditions at sunset time
+                    try:
+                        weather_block = self.tempest_api.get_weather_block()
+                        if weather_block:
+                            drive_metadata['weather'] = weather_block
+                            self.logger.info(f"Weather data added: {weather_block['conditions']}, "
+                                           f"{weather_block['temperature_f']}°F")
+                        else:
+                            self.logger.info("Weather data unavailable (Tempest API not configured or unreachable)")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to fetch weather data: {e}")
+
+                    # Add visual analysis of the timelapse video
+                    try:
+                        visual_block = self.visual_analyzer.analyze_video(video_path)
+                        if visual_block:
+                            drive_metadata['visual_analysis'] = visual_block
+                            self.logger.info(f"Visual analysis added: {visual_block['sunset_type']}, "
+                                           f"intensity {visual_block['intensity']}")
+                        else:
+                            self.logger.info("Visual analysis returned no data")
+                    except Exception as e:
+                        self.logger.warning(f"Visual analysis failed: {e}")
+
                     drive_result = self.drive_uploader.upload_video(video_path, target_date, drive_metadata)
                     if drive_result:
                         self.logger.info(f"Video uploaded to Google Drive: {drive_result['filename']}")
