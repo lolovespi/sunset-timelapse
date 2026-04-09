@@ -31,7 +31,7 @@ class YouTubeUploader:
     """Handles YouTube video uploads"""
     
     # OAuth 2.0 scopes for YouTube uploads and channel access
-    SCOPES = ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly']
+    SCOPES = ['https://www.googleapis.com/auth/youtube', 'https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly']
     
     def __init__(self):
         """Initialize YouTube uploader"""

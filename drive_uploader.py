@@ -444,14 +444,45 @@ class DriveUploader:
     def _generate_description(self, target_date: date, metadata: Optional[Dict]) -> str:
         """Generate file description"""
         description = f"Sunset timelapse captured on {target_date.strftime('%B %d, %Y')}"
-        
+
         if metadata:
             if 'sunset_start' in metadata and 'sunset_end' in metadata:
                 description += f"\nSunset window: {metadata['sunset_start']} - {metadata['sunset_end']}"
-            
+
+            if 'weather' in metadata:
+                w = metadata['weather']
+                description += "\n\nWeather Conditions:"
+                if 'conditions' in w:
+                    description += f"\n  Conditions: {w['conditions']}"
+                if 'temperature_f' in w:
+                    description += f"\n  Temperature: {w['temperature_f']}°F"
+                if 'humidity_pct' in w:
+                    description += f"\n  Humidity: {w['humidity_pct']}%"
+                if 'wind_speed_mph' in w:
+                    description += f"\n  Wind: {w['wind_speed_mph']} mph"
+                if 'cloud_cover_pct' in w and w['cloud_cover_pct'] is not None:
+                    description += f"\n  Cloud Cover: {w['cloud_cover_pct']}%"
+
+            if 'visual_analysis' in metadata:
+                va = metadata['visual_analysis']
+                description += "\n\nVisual Analysis:"
+                if 'sunset_type' in va:
+                    description += f"\n  Sunset Type: {va['sunset_type']}"
+                if 'intensity' in va:
+                    description += f"\n  Intensity: {va['intensity']}"
+                if 'frames' in va:
+                    for frame in va['frames']:
+                        if 'dominant_colors' in frame:
+                            description += f"\n  Colors ({frame.get('position', '?')}): {', '.join(frame['dominant_colors'])}"
+
+            if 'sbs_score' in metadata:
+                description += f"\n\nSunset Brilliance Score: {metadata['sbs_score']}"
+                if 'sbs_grade' in metadata:
+                    description += f" ({metadata['sbs_grade']})"
+
         description += f"\nLocation: {self.config.get('location.city')}, {self.config.get('location.state')}"
         description += "\nAutomatically uploaded by Sunset Timelapse System"
-        
+
         return description
     
     def cleanup_old_files(self, days_old: Optional[int] = None) -> int:
