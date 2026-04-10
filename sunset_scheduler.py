@@ -20,6 +20,7 @@ from camera_interface import CameraInterface
 from video_processor import VideoProcessor
 from youtube_uploader import YouTubeUploader
 from drive_uploader import DriveUploader
+from facebook_uploader import FacebookUploader
 from email_notifier import EmailNotifier
 from sbs_reporter import SBSReporter
 from meteor_detector import MeteorDetector
@@ -41,6 +42,7 @@ class SunsetScheduler:
         self.video_processor = VideoProcessor()
         self.youtube_uploader = YouTubeUploader()
         self.drive_uploader = DriveUploader()
+        self.facebook_uploader = FacebookUploader()
         self.email_notifier = EmailNotifier()
         self.sbs_reporter = SBSReporter()
         self.meteor_detector = MeteorDetector()
@@ -144,7 +146,19 @@ class SunsetScheduler:
         except Exception as e:
             self.logger.warning(f"⚠ Google Drive uploader error: {e} (cloud storage will be skipped)")
             validation_results.append(True)  # Non-critical failure
-            
+
+        # Validate Facebook uploader (optional)
+        try:
+            if self.facebook_uploader.validate():
+                self.logger.info("✓ Facebook uploader validation passed")
+                validation_results.append(True)
+            else:
+                self.logger.warning("⚠ Facebook uploader validation failed (Facebook posting will be skipped)")
+                validation_results.append(True)  # Non-critical failure
+        except Exception as e:
+            self.logger.warning(f"⚠ Facebook uploader error: {e} (Facebook posting will be skipped)")
+            validation_results.append(True)  # Non-critical failure
+
         success = all(validation_results)
         
         if success:
@@ -676,7 +690,33 @@ class SunsetScheduler:
                 self.logger.info(f"SBS Analysis completed: Score {sbs_report['summary']['daily_brilliance_score']:.1f} "
                                f"(Grade {sbs_report['summary']['quality_grade']})")
             
-            # Step 4: Upload to Google Drive (for Claude bot processing)
+            # Step 4: Gather weather and visual analysis data (for Drive, Facebook, etc.)
+            weather_block = None
+            visual_block = None
+
+            # Fetch weather data
+            try:
+                weather_block = self.tempest_api.get_weather_block()
+                if weather_block:
+                    self.logger.info(f"Weather data: {weather_block['conditions']}, "
+                                   f"{weather_block['temperature_f']}°F")
+                else:
+                    self.logger.info("Weather data unavailable (Tempest API not configured or unreachable)")
+            except Exception as e:
+                self.logger.warning(f"Failed to fetch weather data: {e}")
+
+            # Perform visual analysis
+            try:
+                visual_block = self.visual_analyzer.analyze_video(video_path)
+                if visual_block:
+                    self.logger.info(f"Visual analysis: {visual_block['sunset_type']}, "
+                                   f"intensity {visual_block['intensity']}")
+                else:
+                    self.logger.info("Visual analysis returned no data")
+            except Exception as e:
+                self.logger.warning(f"Visual analysis failed: {e}")
+
+            # Step 4.5: Upload to Google Drive (for Claude bot processing)
             drive_enabled = self.config.get('drive.enabled', False)
             if drive_enabled:
                 try:
@@ -686,8 +726,8 @@ class SunsetScheduler:
                         'sunset_end': sunset_end.isoformat(),
                         'capture_date': target_date.isoformat()
                     }
-                    
-                    # Add SBS data to metadata for Claude bot
+
+                    # Add SBS data to metadata
                     if sbs_report:
                         drive_metadata.update({
                             'sbs_score': sbs_report['summary']['daily_brilliance_score'],
@@ -695,29 +735,11 @@ class SunsetScheduler:
                             'sbs_analysis': sbs_report['summary']
                         })
 
-                    # Add weather conditions at sunset time
-                    try:
-                        weather_block = self.tempest_api.get_weather_block()
-                        if weather_block:
-                            drive_metadata['weather'] = weather_block
-                            self.logger.info(f"Weather data added: {weather_block['conditions']}, "
-                                           f"{weather_block['temperature_f']}°F")
-                        else:
-                            self.logger.info("Weather data unavailable (Tempest API not configured or unreachable)")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to fetch weather data: {e}")
-
-                    # Add visual analysis of the timelapse video
-                    try:
-                        visual_block = self.visual_analyzer.analyze_video(video_path)
-                        if visual_block:
-                            drive_metadata['visual_analysis'] = visual_block
-                            self.logger.info(f"Visual analysis added: {visual_block['sunset_type']}, "
-                                           f"intensity {visual_block['intensity']}")
-                        else:
-                            self.logger.info("Visual analysis returned no data")
-                    except Exception as e:
-                        self.logger.warning(f"Visual analysis failed: {e}")
+                    # Add weather and visual data
+                    if weather_block:
+                        drive_metadata['weather'] = weather_block
+                    if visual_block:
+                        drive_metadata['visual_analysis'] = visual_block
 
                     drive_result = self.drive_uploader.upload_video(video_path, target_date, drive_metadata)
                     if drive_result:
@@ -726,7 +748,36 @@ class SunsetScheduler:
                         self.logger.warning("Google Drive upload failed")
                 except Exception as e:
                     self.logger.warning(f"Google Drive upload error: {e}")
-            
+
+            # Step 4.6: Post to Facebook with AI-generated caption
+            try:
+                # Build complete metadata for Facebook posting
+                facebook_metadata = {
+                    'date': target_date.isoformat()
+                }
+
+                # Add SBS data
+                if sbs_report:
+                    facebook_metadata.update({
+                        'sbs_score': sbs_report['summary']['daily_brilliance_score'],
+                        'sbs_grade': sbs_report['summary']['quality_grade']
+                    })
+
+                # Add weather and visual data
+                if weather_block:
+                    facebook_metadata['weather'] = weather_block
+                if visual_block:
+                    facebook_metadata['visual_analysis'] = visual_block
+
+                # Post to Facebook
+                fb_success = self.facebook_uploader.post_sunset(video_path, facebook_metadata)
+                if fb_success:
+                    self.logger.info("Successfully posted to Facebook")
+                else:
+                    self.logger.warning("Facebook posting failed (non-critical)")
+            except Exception as e:
+                self.logger.warning(f"Facebook posting error: {e} (non-critical)")
+
             # Step 5: Upload to YouTube with SBS enhancements
             upload_success = self.upload_to_youtube_with_sbs(video_path, target_date, sbs_report)
             if not upload_success:

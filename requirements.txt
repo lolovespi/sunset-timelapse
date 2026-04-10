@@ -30,6 +30,9 @@ google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
 
+# Facebook API and AI caption generation
+anthropic
+
 # Scheduling (for Raspberry Pi)
 schedule
 

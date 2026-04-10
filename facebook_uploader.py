@@ -1,0 +1,356 @@
+"""
+Facebook Uploader
+Handles posting timelapse videos to Facebook with AI-generated captions
+"""
+
+import logging
+import os
+import json
+import requests
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Dict, Any
+
+try:
+    from anthropic import Anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    logging.warning("Anthropic library not available. Facebook caption generation will be disabled.")
+    ANTHROPIC_AVAILABLE = False
+
+from config_manager import get_config
+from email_notifier import EmailNotifier
+
+
+class FacebookUploader:
+    """Handles Facebook video uploads with AI-generated captions"""
+
+    # Facebook Graph API version
+    GRAPH_API_VERSION = "v19.0"
+    GRAPH_VIDEO_URL = f"https://graph-video.facebook.com/{GRAPH_API_VERSION}"
+
+    # Hashtags to append to all posts
+    HASHTAGS = "#Pelham #Alabama #SunsetTimelapse #Sunset #BirminghamAL #AlabamaSky #SunsetLovers #Timelapse #GoldenHour #NaturePhotography"
+
+    def __init__(self):
+        """Initialize Facebook uploader"""
+        self.config = get_config()
+        self.logger = logging.getLogger(__name__)
+        self.email_notifier = EmailNotifier()
+        self.anthropic_client = None
+
+        # Load Facebook configuration
+        self.facebook_config = self._load_facebook_config()
+        self.page_id = self.facebook_config.get('page_id')
+        self.page_access_token = self.facebook_config.get('page_access_token')
+
+        # Load Anthropic API key
+        self.anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
+
+        # Initialize Anthropic client
+        if ANTHROPIC_AVAILABLE and self.anthropic_api_key:
+            self.anthropic_client = Anthropic(api_key=self.anthropic_api_key)
+            self.logger.info("Anthropic client initialized")
+        else:
+            if not ANTHROPIC_AVAILABLE:
+                self.logger.warning("Anthropic library not available")
+            if not self.anthropic_api_key:
+                self.logger.warning("ANTHROPIC_API_KEY not set in environment")
+
+        # Tracking database path
+        self.tracking_db_path = self._get_tracking_db_path()
+
+        self.logger.info("Facebook uploader initialized")
+
+    def _load_facebook_config(self) -> Dict[str, str]:
+        """Load Facebook configuration from facebook_config.json"""
+        config_path = Path(__file__).parent / 'facebook_config.json'
+
+        if not config_path.exists():
+            self.logger.warning(f"Facebook config not found at {config_path}")
+            return {}
+
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            self.logger.info("Facebook configuration loaded")
+            return config
+        except Exception as e:
+            self.logger.error(f"Failed to load Facebook config: {e}")
+            return {}
+
+    def _get_tracking_db_path(self) -> Path:
+        """Get path to tracking database"""
+        # Store in project root for simplicity
+        return Path(__file__).parent / 'facebook_posts.json'
+
+    def load_tracking_db(self) -> Dict[str, Any]:
+        """Load the tracking database"""
+        if not self.tracking_db_path.exists():
+            return {}
+
+        try:
+            with open(self.tracking_db_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.error(f"Failed to load tracking database: {e}")
+            return {}
+
+    def save_tracking_db(self, data: Dict[str, Any]):
+        """Save the tracking database"""
+        try:
+            with open(self.tracking_db_path, 'w') as f:
+                json.dump(data, f, indent=2)
+            self.logger.debug("Tracking database saved")
+        except Exception as e:
+            self.logger.error(f"Failed to save tracking database: {e}")
+
+    def update_tracking_db(self, date_str: str, status: str, facebook_id: Optional[str] = None):
+        """Update tracking database with posting status"""
+        db = self.load_tracking_db()
+
+        entry = {
+            'status': status,
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }
+
+        if facebook_id:
+            entry['facebook_id'] = facebook_id
+
+        if status == 'posted':
+            entry['posted_at'] = datetime.now(timezone.utc).isoformat()
+
+        db[date_str] = entry
+        self.save_tracking_db(db)
+        self.logger.info(f"Updated tracking database: {date_str} -> {status}")
+
+    def generate_caption(self, metadata: Dict[str, Any]) -> str:
+        """
+        Generate a casual Facebook caption using Anthropic API
+
+        Args:
+            metadata: Dictionary containing weather data, visual analysis, SBS score, etc.
+
+        Returns:
+            Generated caption (2-3 sentences, casual tone)
+        """
+        if not self.anthropic_client:
+            self.logger.error("Anthropic client not initialized. Cannot generate caption.")
+            return "Today's sunset timelapse from Pelham, Alabama."
+
+        try:
+            # Build context for the AI
+            prompt = self._build_caption_prompt(metadata)
+
+            # Call Anthropic API
+            message = self.anthropic_client.messages.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=150,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+
+            caption = message.content[0].text.strip()
+            self.logger.info(f"Generated caption: {caption}")
+            return caption
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate caption with Anthropic API: {e}")
+            # Fallback to simple caption
+            return "Today's sunset timelapse from Pelham, Alabama."
+
+    def _build_caption_prompt(self, metadata: Dict[str, Any]) -> str:
+        """Build the prompt for Anthropic API"""
+        # Extract metadata fields
+        date_str = metadata.get('date', 'today')
+        weather = metadata.get('weather', {})
+        visual = metadata.get('visual_analysis', {})
+        sbs_score = metadata.get('sbs_score')
+        sbs_grade = metadata.get('sbs_grade')
+
+        # Convert date to day of week
+        try:
+            from datetime import datetime
+            date_obj = datetime.fromisoformat(date_str)
+            day_of_week = date_obj.strftime('%A')
+            season = self._get_season(date_obj.month)
+        except:
+            day_of_week = ''
+            season = ''
+
+        # Build prompt
+        prompt = f"""Write a casual, authentic 2-3 sentence Facebook caption for today's sunset timelapse video.
+
+Date: {date_str} ({day_of_week if day_of_week else 'Unknown day'})
+Season: {season}
+
+Weather at sunset:
+- Conditions: {weather.get('conditions', 'Unknown')}
+- Temperature: {weather.get('temperature_f', 'Unknown')}°F
+- Feels like: {weather.get('feels_like_f', 'Unknown')}°F
+- Humidity: {weather.get('humidity_pct', 'Unknown')}%
+- Wind: {weather.get('wind_speed_mph', 'Unknown')} mph
+- Cloud cover: {weather.get('cloud_cover_pct', 'Unknown')}%
+
+Visual analysis:
+- Sunset type: {visual.get('sunset_type', 'Unknown')}
+- Intensity: {visual.get('intensity', 'Unknown')}
+- Quality score (SBS): {sbs_score}/100 (Grade: {sbs_grade})
+
+Guidelines:
+- Write like a real person, not a marketing post
+- Be conversational and casual
+- Draw naturally from interesting weather or visual details (dramatic skies, unusual temperature, heavy clouds, etc.)
+- Reference day of week or season when it feels natural
+- Vary your tone - don't sound formulaic
+- NEVER use "beautiful sunset" or other generic phrases
+- NO hashtags (we add those separately)
+- 2-3 sentences max
+- Focus on what makes THIS sunset interesting or notable
+
+Caption:"""
+
+        return prompt
+
+    def _get_season(self, month: int) -> str:
+        """Get season from month"""
+        if month in [12, 1, 2]:
+            return "Winter"
+        elif month in [3, 4, 5]:
+            return "Spring"
+        elif month in [6, 7, 8]:
+            return "Summer"
+        elif month in [9, 10, 11]:
+            return "Fall"
+        return ""
+
+    def append_hashtags(self, caption: str) -> str:
+        """Append hashtags to caption"""
+        return f"{caption}\n\n{self.HASHTAGS}"
+
+    def post_video(self, video_path: str, caption: str, date_str: str) -> Optional[str]:
+        """
+        Post video to Facebook
+
+        Args:
+            video_path: Path to local .mp4 file
+            caption: Complete caption with hashtags
+            date_str: Date string (YYYY-MM-DD) for tracking
+
+        Returns:
+            Facebook post ID if successful, None otherwise
+        """
+        if not self.page_id or not self.page_access_token:
+            self.logger.error("Facebook credentials not configured")
+            return None
+
+        if not os.path.exists(video_path):
+            self.logger.error(f"Video file not found: {video_path}")
+            return None
+
+        try:
+            self.logger.info(f"Uploading video to Facebook: {video_path}")
+
+            # Facebook video upload endpoint
+            url = f"{self.GRAPH_VIDEO_URL}/{self.page_id}/videos"
+
+            # Prepare the video file
+            with open(video_path, 'rb') as video_file:
+                files = {
+                    'source': video_file
+                }
+                data = {
+                    'description': caption,
+                    'access_token': self.page_access_token
+                }
+
+                # Upload video
+                response = requests.post(url, files=files, data=data, timeout=300)
+
+            # Check response
+            if response.status_code == 200:
+                result = response.json()
+                facebook_id = result.get('id')
+
+                if facebook_id:
+                    self.logger.info(f"Successfully posted to Facebook. Post ID: {facebook_id}")
+                    self.update_tracking_db(date_str, 'posted', facebook_id)
+                    return facebook_id
+                else:
+                    self.logger.error(f"Facebook response missing 'id': {result}")
+                    return None
+            else:
+                self.logger.error(f"Facebook upload failed. Status: {response.status_code}")
+                self.logger.error(f"Response: {response.text}")
+
+                # Send email notification
+                self.email_notifier.send_email(
+                    subject=f"Facebook Upload Failed - {date_str}",
+                    body=f"Failed to upload sunset timelapse to Facebook.\n\nStatus: {response.status_code}\n\nResponse:\n{response.text}"
+                )
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Exception during Facebook upload: {e}")
+            self.email_notifier.send_email(
+                subject=f"Facebook Upload Error - {date_str}",
+                body=f"Exception occurred during Facebook upload:\n\n{str(e)}"
+            )
+            return None
+
+    def validate(self) -> bool:
+        """Validate Facebook uploader configuration"""
+        if not self.page_id:
+            self.logger.error("Facebook page_id not configured")
+            return False
+
+        if not self.page_access_token:
+            self.logger.error("Facebook page_access_token not configured")
+            return False
+
+        if not self.anthropic_api_key:
+            self.logger.warning("ANTHROPIC_API_KEY not set - will use fallback captions")
+            # Don't fail validation - we can still post with simple captions
+
+        if not ANTHROPIC_AVAILABLE:
+            self.logger.warning("Anthropic library not installed - will use fallback captions")
+
+        self.logger.info("Facebook uploader validation passed")
+        return True
+
+    def post_sunset(self, video_path: str, metadata: Dict[str, Any]) -> bool:
+        """
+        Complete Facebook posting workflow
+
+        Args:
+            video_path: Path to sunset video file
+            metadata: Complete metadata including weather, visual analysis, SBS score
+
+        Returns:
+            True if successful, False otherwise
+        """
+        date_str = metadata.get('date', datetime.now().strftime('%Y-%m-%d'))
+
+        # Check if already posted
+        db = self.load_tracking_db()
+        if date_str in db and db[date_str].get('status') == 'posted':
+            self.logger.info(f"Sunset for {date_str} already posted to Facebook")
+            return True
+
+        try:
+            # Generate caption
+            self.logger.info("Generating caption with Anthropic API...")
+            caption = self.generate_caption(metadata)
+
+            # Append hashtags
+            full_caption = self.append_hashtags(caption)
+
+            # Post to Facebook
+            facebook_id = self.post_video(video_path, full_caption, date_str)
+
+            return facebook_id is not None
+
+        except Exception as e:
+            self.logger.error(f"Failed to post sunset to Facebook: {e}")
+            return False
