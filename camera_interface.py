@@ -204,36 +204,40 @@ class CameraInterface:
         import tempfile
         from pathlib import Path
         from datetime import timedelta
-        
+
         captured_images = []
         chunk_duration_minutes = 15  # Record in 15-minute chunks for reliability
-        
+
+        # Use project temp dir instead of system /tmp (which may be a small tmpfs)
+        temp_dir = self.config.get_storage_paths()['temp']
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
         try:
             # Calculate total duration and chunk strategy
             total_duration = (end_time - start_time).total_seconds()
             chunk_duration = chunk_duration_minutes * 60  # Convert to seconds
             chunks_needed = int(total_duration / chunk_duration) + (1 if total_duration % chunk_duration > 0 else 0)
-            
+
             self.logger.info(f"Recording {total_duration:.0f} seconds in {chunks_needed} chunks of {chunk_duration_minutes} minutes each")
-            
+
             # Build direct RTSP URL for Reolink
             rtsp_url = f"rtsp://{self.username}:{self.password}@{self.ip}:{self.rtsp_port}/h264Preview_01_main"
-            
+
             chunk_videos = []
             current_time = start_time
-            
+
             # Record each chunk
             for chunk_idx in range(chunks_needed):
                 chunk_end_time = min(current_time + timedelta(seconds=chunk_duration), end_time)
                 actual_chunk_duration = (chunk_end_time - current_time).total_seconds()
-                
+
                 if actual_chunk_duration <= 0:
                     break
-                    
+
                 self.logger.info(f"Recording chunk {chunk_idx + 1}/{chunks_needed}: {actual_chunk_duration:.0f} seconds")
-                
+
                 # Create temp video file for this chunk
-                with tempfile.NamedTemporaryFile(suffix=f'_chunk_{chunk_idx}.mp4', delete=False) as temp_video:
+                with tempfile.NamedTemporaryFile(suffix=f'_chunk_{chunk_idx}.mp4', delete=False, dir=str(temp_dir)) as temp_video:
                     temp_video_path = Path(temp_video.name)
             
                 # Record RTSP stream for this chunk using ffmpeg with stream copy
@@ -335,17 +339,21 @@ class CameraInterface:
         """
         import subprocess
         import tempfile
-        
+
         if not chunk_paths:
             return None
-            
+
         if len(chunk_paths) == 1:
             return chunk_paths[0]
-        
+
+        # Use project temp dir instead of system /tmp
+        temp_dir = self.config.get_storage_paths()['temp']
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
         try:
             # Check available disk space before concatenation
             import shutil
-            available_space = shutil.disk_usage(tempfile.gettempdir()).free
+            available_space = shutil.disk_usage(str(temp_dir)).free
             total_chunk_size = sum(chunk.stat().st_size for chunk in chunk_paths if chunk.exists())
 
             if available_space < total_chunk_size * 1.5:  # Need 1.5x space for safety
@@ -357,11 +365,11 @@ class CameraInterface:
                            f"{total_chunk_size // (1024**3):.1f}GB input data")
 
             # Create temp file for concatenated video
-            with tempfile.NamedTemporaryFile(suffix='_concatenated.mp4', delete=False) as temp_concat:
+            with tempfile.NamedTemporaryFile(suffix='_concatenated.mp4', delete=False, dir=str(temp_dir)) as temp_concat:
                 concat_path = Path(temp_concat.name)
-            
+
             # Create concat file list for FFmpeg
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as concat_file:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, dir=str(temp_dir)) as concat_file:
                 for chunk_path in chunk_paths:
                     concat_file.write(f"file '{chunk_path}'\n")
                 concat_file_path = Path(concat_file.name)
