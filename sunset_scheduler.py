@@ -540,6 +540,45 @@ class SunsetScheduler:
 
             if created_videos:
                 self.logger.info(f"✓ Successfully recovered footage for {yesterday} via historical retrieval")
+
+                # Upload to Google Drive with full metadata (weather, visual analysis)
+                drive_enabled = self.config.get('drive.enabled', False)
+                if drive_enabled:
+                    try:
+                        video_path = created_videos[0]
+                        sunset_start, sunset_end = self.sunset_calc.get_capture_window(yesterday)
+                        drive_metadata = {
+                            'sunset_start': sunset_start.isoformat(),
+                            'sunset_end': sunset_end.isoformat(),
+                            'capture_date': yesterday.isoformat()
+                        }
+
+                        # Add weather data
+                        try:
+                            weather_block = self.tempest_api.get_weather_block()
+                            if weather_block:
+                                drive_metadata['weather'] = weather_block
+                                self.logger.info(f"Recovery: Weather data added: {weather_block['conditions']}")
+                        except Exception as e:
+                            self.logger.warning(f"Recovery: Failed to fetch weather data: {e}")
+
+                        # Add visual analysis
+                        try:
+                            visual_block = self.visual_analyzer.analyze_video(video_path)
+                            if visual_block:
+                                drive_metadata['visual_analysis'] = visual_block
+                                self.logger.info(f"Recovery: Visual analysis added: {visual_block['sunset_type']}")
+                        except Exception as e:
+                            self.logger.warning(f"Recovery: Visual analysis failed: {e}")
+
+                        drive_result = self.drive_uploader.upload_video(video_path, yesterday, drive_metadata)
+                        if drive_result:
+                            self.logger.info(f"Recovery: Video uploaded to Google Drive: {drive_result['filename']}")
+                        else:
+                            self.logger.warning("Recovery: Google Drive upload failed")
+                    except Exception as e:
+                        self.logger.warning(f"Recovery: Google Drive upload error: {e}")
+
                 self.email_notifier.send_notification(
                     f"Automatic Recovery: {yesterday}",
                     f"Live capture failed for {yesterday}, but footage was successfully recovered from camera recordings.",
