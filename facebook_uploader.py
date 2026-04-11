@@ -43,6 +43,7 @@ class FacebookUploader:
         self.facebook_config = self._load_facebook_config()
         self.page_id = self.facebook_config.get('page_id')
         self.page_access_token = self.facebook_config.get('page_access_token')
+        self.instagram_account_id = self.facebook_config.get('instagram_account_id')
 
         # Load Anthropic API key
         self.anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
@@ -322,6 +323,133 @@ Caption:"""
             )
             return None
 
+    def post_to_instagram(self, video_path: str, caption: str) -> Optional[str]:
+        """
+        Post video as a Reel to Instagram via the Content Publishing API.
+
+        Instagram requires a publicly accessible URL for video uploads.
+        We upload to Facebook first, then use that URL for Instagram.
+
+        Args:
+            video_path: Path to local .mp4 file
+            caption: Caption text with hashtags
+
+        Returns:
+            Instagram media ID if successful, None otherwise
+        """
+        if not self.instagram_account_id:
+            self.logger.info("Instagram account ID not configured, skipping Instagram post")
+            return None
+
+        if not self.page_access_token:
+            self.logger.error("Page access token required for Instagram posting")
+            return None
+
+        try:
+            import time
+
+            graph_url = f"https://graph.facebook.com/{self.GRAPH_API_VERSION}"
+
+            # Step 1: Upload video to get a hosted URL via Facebook
+            # Use the resumable upload protocol for Instagram
+            self.logger.info("Uploading video for Instagram Reel...")
+
+            # First, initialize the upload
+            init_url = f"{graph_url}/{self.instagram_account_id}/media"
+            init_data = {
+                'media_type': 'REELS',
+                'caption': caption,
+                'access_token': self.page_access_token,
+                'upload_type': 'resumable',
+            }
+
+            init_response = requests.post(init_url, data=init_data, timeout=60)
+            if init_response.status_code != 200:
+                self.logger.error(f"Instagram init failed: {init_response.text}")
+                return None
+
+            init_result = init_response.json()
+            container_id = init_result.get('id')
+            upload_url = init_result.get('uri')
+
+            if not container_id or not upload_url:
+                self.logger.error(f"Instagram init missing id/uri: {init_result}")
+                return None
+
+            self.logger.info(f"Instagram container created: {container_id}")
+
+            # Step 2: Upload the video file
+            file_size = os.path.getsize(video_path)
+            headers = {
+                'Authorization': f'OAuth {self.page_access_token}',
+                'offset': '0',
+                'file_size': str(file_size),
+            }
+
+            with open(video_path, 'rb') as video_file:
+                upload_response = requests.post(
+                    upload_url,
+                    headers=headers,
+                    data=video_file,
+                    timeout=300
+                )
+
+            if upload_response.status_code != 200:
+                self.logger.error(f"Instagram upload failed: {upload_response.text}")
+                return None
+
+            self.logger.info("Video uploaded, waiting for Instagram to process...")
+
+            # Step 3: Poll for container status
+            status_url = f"{graph_url}/{container_id}"
+            for attempt in range(30):  # Wait up to 5 minutes
+                time.sleep(10)
+                status_response = requests.get(
+                    status_url,
+                    params={
+                        'fields': 'status_code,status',
+                        'access_token': self.page_access_token
+                    },
+                    timeout=30
+                )
+
+                if status_response.status_code == 200:
+                    status = status_response.json()
+                    status_code = status.get('status_code')
+                    self.logger.debug(f"Instagram container status: {status_code}")
+
+                    if status_code == 'FINISHED':
+                        break
+                    elif status_code == 'ERROR':
+                        self.logger.error(f"Instagram processing failed: {status}")
+                        return None
+            else:
+                self.logger.error("Instagram processing timed out")
+                return None
+
+            # Step 4: Publish the container
+            publish_url = f"{graph_url}/{self.instagram_account_id}/media_publish"
+            publish_response = requests.post(
+                publish_url,
+                data={
+                    'creation_id': container_id,
+                    'access_token': self.page_access_token
+                },
+                timeout=60
+            )
+
+            if publish_response.status_code == 200:
+                media_id = publish_response.json().get('id')
+                self.logger.info(f"Successfully posted to Instagram. Media ID: {media_id}")
+                return media_id
+            else:
+                self.logger.error(f"Instagram publish failed: {publish_response.text}")
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Instagram posting error: {e}")
+            return None
+
     def validate(self) -> bool:
         """Validate Facebook uploader configuration"""
         if not self.page_id:
@@ -334,17 +462,21 @@ Caption:"""
 
         if not self.anthropic_api_key:
             self.logger.warning("ANTHROPIC_API_KEY not set - will use fallback captions")
-            # Don't fail validation - we can still post with simple captions
 
         if not ANTHROPIC_AVAILABLE:
             self.logger.warning("Anthropic library not installed - will use fallback captions")
+
+        if self.instagram_account_id:
+            self.logger.info("Instagram posting enabled")
+        else:
+            self.logger.info("Instagram posting disabled (no instagram_account_id)")
 
         self.logger.info("Facebook uploader validation passed")
         return True
 
     def post_sunset(self, video_path: str, metadata: Dict[str, Any]) -> bool:
         """
-        Complete Facebook posting workflow
+        Complete Facebook + Instagram posting workflow
 
         Args:
             video_path: Path to sunset video file
@@ -371,6 +503,14 @@ Caption:"""
 
             # Post to Facebook
             facebook_id = self.post_video(video_path, full_caption, date_str)
+
+            # Post to Instagram (non-blocking)
+            try:
+                instagram_id = self.post_to_instagram(str(video_path), full_caption)
+                if instagram_id:
+                    self.logger.info(f"Instagram post successful: {instagram_id}")
+            except Exception as e:
+                self.logger.warning(f"Instagram posting failed (non-critical): {e}")
 
             return facebook_id is not None
 
