@@ -567,12 +567,14 @@ class SunsetScheduler:
                             'capture_date': yesterday.isoformat()
                         }
 
-                        # Add weather data
+                        # Add historical weather data from sunset time
                         try:
-                            weather_block = self.tempest_api.get_weather_block()
+                            sunset_hour = sunset_start.hour + 1  # approximate sunset is 1h into window
+                            weather_block = self.tempest_api.get_weather_block(yesterday, sunset_hour)
                             if weather_block:
                                 drive_metadata['weather'] = weather_block
-                                self.logger.info(f"Recovery: Weather data added: {weather_block['conditions']}")
+                                self.logger.info(f"Recovery: Historical weather added: {weather_block['conditions']}, "
+                                               f"{weather_block['temperature_f']}°F (observed {weather_block['observed_at']})")
                         except Exception as e:
                             self.logger.warning(f"Recovery: Failed to fetch weather data: {e}")
 
