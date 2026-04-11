@@ -607,6 +607,11 @@ class CameraInterface:
             sunset_calc = SunsetCalculator()
             sunset_time = sunset_calc.get_sunset_time(start_time.date())
             chunk_time = start_time + timedelta(seconds=current_offset - (15 * 60))  # Middle of chunk
+            # Ensure both datetimes have matching timezone awareness
+            if sunset_time.tzinfo is not None and chunk_time.tzinfo is None:
+                chunk_time = chunk_time.replace(tzinfo=sunset_time.tzinfo)
+            elif sunset_time.tzinfo is None and chunk_time.tzinfo is not None:
+                sunset_time = sunset_time.replace(tzinfo=chunk_time.tzinfo)
             sunset_offset_minutes = (chunk_time - sunset_time).total_seconds() / 60
             
             # Analyze chunk

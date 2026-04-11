@@ -297,22 +297,26 @@ class SunsetScheduler:
             self.logger.error(f"Failed to upload video: {e}")
             return False
     
-    def upload_to_youtube_with_sbs(self, video_path: Path, target_date: date, 
-                                  sbs_report: Optional[Dict] = None, 
-                                  actual_start_time: datetime = None, 
-                                  actual_end_time: datetime = None, 
-                                  is_test: bool = False) -> bool:
+    def upload_to_youtube_with_sbs(self, video_path: Path, target_date: date,
+                                  sbs_report: Optional[Dict] = None,
+                                  actual_start_time: datetime = None,
+                                  actual_end_time: datetime = None,
+                                  is_test: bool = False,
+                                  weather_block: Optional[Dict] = None,
+                                  visual_block: Optional[Dict] = None) -> bool:
         """
         Upload video to YouTube with SBS-enhanced title and description
-        
+
         Args:
             video_path: Path to video file
             target_date: Date the video was captured
             sbs_report: SBS analysis report (optional)
             actual_start_time: Actual start time of capture (optional)
-            actual_end_time: Actual end time of capture (optional)  
+            actual_end_time: Actual end time of capture (optional)
             is_test: If True, use test video title and description
-            
+            weather_block: Weather data from Tempest API (optional)
+            visual_block: Visual analysis data (optional)
+
         Returns:
             True if upload successful, False otherwise
         """
@@ -322,18 +326,39 @@ class SunsetScheduler:
                 start_time, end_time = actual_start_time, actual_end_time
             else:
                 start_time, end_time = self.sunset_calc.get_capture_window(target_date)
-            
+
             # Get SBS enhancements if report available
             title_enhancement = ""
             description_enhancement = ""
-            
+
             if sbs_report:
                 title_enhancement = self.sbs_reporter.get_video_title_enhancement(target_date)
                 description_enhancement = self.sbs_reporter.get_video_description_enhancement(target_date)
-            
+
+            # Add weather and visual data to description
+            if weather_block:
+                description_enhancement += "\n\nWeather Conditions:"
+                if 'conditions' in weather_block:
+                    description_enhancement += f"\n  {weather_block['conditions'].title()}"
+                if 'temperature_f' in weather_block:
+                    description_enhancement += f"\n  Temperature: {weather_block['temperature_f']}°F"
+                if 'humidity_pct' in weather_block:
+                    description_enhancement += f"\n  Humidity: {weather_block['humidity_pct']}%"
+                if 'wind_speed_mph' in weather_block:
+                    description_enhancement += f"\n  Wind: {weather_block['wind_speed_mph']} mph"
+                if weather_block.get('cloud_cover_pct') is not None:
+                    description_enhancement += f"\n  Cloud Cover: {weather_block['cloud_cover_pct']}%"
+
+            if visual_block:
+                description_enhancement += "\n\nVisual Analysis:"
+                if 'sunset_type' in visual_block:
+                    description_enhancement += f"\n  Sunset Type: {visual_block['sunset_type'].title()}"
+                if 'intensity' in visual_block:
+                    description_enhancement += f"\n  Intensity: {visual_block['intensity'].title()}"
+
             # Upload video with enhancements
             video_id = self.youtube_uploader.upload_video_with_sbs_enhancements(
-                video_path, target_date, start_time, end_time, 
+                video_path, target_date, start_time, end_time,
                 title_enhancement, description_enhancement, is_test
             )
             
@@ -780,8 +805,11 @@ class SunsetScheduler:
             except Exception as e:
                 self.logger.warning(f"Facebook posting error: {e} (non-critical)")
 
-            # Step 5: Upload to YouTube with SBS enhancements
-            upload_success = self.upload_to_youtube_with_sbs(video_path, target_date, sbs_report)
+            # Step 5: Upload to YouTube with SBS enhancements + weather/visual data
+            upload_success = self.upload_to_youtube_with_sbs(
+                video_path, target_date, sbs_report,
+                weather_block=weather_block, visual_block=visual_block
+            )
             if not upload_success:
                 self.logger.warning("YouTube upload failed, but workflow will continue")
                 # Send email notification for YouTube upload failure (with SBS data)
