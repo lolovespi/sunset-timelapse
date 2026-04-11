@@ -124,6 +124,30 @@ class FacebookUploader:
         self.save_tracking_db(db)
         self.logger.info(f"Updated tracking database: {date_str} -> {status}")
 
+    def _build_fallback_caption(self, metadata: Dict[str, Any]) -> str:
+        """Build a caption from metadata when AI generation is unavailable"""
+        date_str = metadata.get('capture_date', '')
+        try:
+            from datetime import datetime as dt
+            d = dt.strptime(date_str, '%Y-%m-%d')
+            date_display = d.strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            date_display = date_str or 'today'
+
+        caption = f"Sunset timelapse from Pelham, Alabama on {date_display}."
+
+        weather = metadata.get('weather')
+        if weather:
+            parts = []
+            if weather.get('conditions'):
+                parts.append(weather['conditions'].title())
+            if weather.get('temperature_f') is not None:
+                parts.append(f"{weather['temperature_f']}°F")
+            if parts:
+                caption += f" {', '.join(parts)}."
+
+        return caption
+
     def generate_caption(self, metadata: Dict[str, Any]) -> str:
         """
         Generate a casual Facebook caption using Anthropic API
@@ -136,7 +160,7 @@ class FacebookUploader:
         """
         if not self.anthropic_client:
             self.logger.error("Anthropic client not initialized. Cannot generate caption.")
-            return "Today's sunset timelapse from Pelham, Alabama."
+            return self._build_fallback_caption(metadata)
 
         try:
             # Build context for the AI
@@ -157,8 +181,7 @@ class FacebookUploader:
 
         except Exception as e:
             self.logger.error(f"Failed to generate caption with Anthropic API: {e}")
-            # Fallback to simple caption
-            return "Today's sunset timelapse from Pelham, Alabama."
+            return self._build_fallback_caption(metadata)
 
     def _build_caption_prompt(self, metadata: Dict[str, Any]) -> str:
         """Build the prompt for Anthropic API"""
