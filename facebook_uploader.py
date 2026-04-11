@@ -309,17 +309,17 @@ Caption:"""
                 self.logger.error(f"Response: {response.text}")
 
                 # Send email notification
-                self.email_notifier.send_email(
-                    subject=f"Facebook Upload Failed - {date_str}",
-                    body=f"Failed to upload sunset timelapse to Facebook.\n\nStatus: {response.status_code}\n\nResponse:\n{response.text}"
+                self.email_notifier.send_notification(
+                    f"Facebook Upload Failed - {date_str}",
+                    f"Failed to upload sunset timelapse to Facebook.\n\nStatus: {response.status_code}\n\nResponse:\n{response.text}"
                 )
                 return None
 
         except Exception as e:
             self.logger.error(f"Exception during Facebook upload: {e}")
-            self.email_notifier.send_email(
-                subject=f"Facebook Upload Error - {date_str}",
-                body=f"Exception occurred during Facebook upload:\n\n{str(e)}"
+            self.email_notifier.send_notification(
+                f"Facebook Upload Error - {date_str}",
+                f"Exception occurred during Facebook upload:\n\n{str(e)}"
             )
             return None
 

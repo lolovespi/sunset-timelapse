@@ -522,6 +522,10 @@ class SunsetScheduler:
             self.logger.error(f"Error during overnight meteor scan: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
+            self.email_notifier.send_notification(
+                "Overnight Meteor Scan Failed",
+                f"The overnight meteor scan encountered an error:\n\n{str(e)}"
+            )
 
     def _attempt_historical_recovery(self):
         """Attempt to recover yesterday's footage if live capture failed"""
@@ -617,8 +621,16 @@ class SunsetScheduler:
                             self.logger.info(f"Recovery: Video uploaded to Google Drive: {drive_result['filename']}")
                         else:
                             self.logger.warning("Recovery: Google Drive upload failed")
+                            self.email_notifier.send_notification(
+                                f"Recovery: Drive Upload Failed - {yesterday}",
+                                f"Video was recovered for {yesterday} but Google Drive upload failed."
+                            )
                     except Exception as e:
                         self.logger.warning(f"Recovery: Google Drive upload error: {e}")
+                        self.email_notifier.send_notification(
+                            f"Recovery: Drive Upload Error - {yesterday}",
+                            f"Error uploading recovered video to Google Drive:\n\n{str(e)}"
+                        )
 
                 self.email_notifier.send_notification(
                     f"Automatic Recovery: {yesterday}",
@@ -635,7 +647,11 @@ class SunsetScheduler:
 
         except Exception as e:
             self.logger.error(f"Error during historical recovery attempt: {e}")
-    
+            self.email_notifier.send_notification(
+                f"Recovery Error: {date.today() - timedelta(days=1)}",
+                f"Historical recovery process crashed:\n\n{str(e)}"
+            )
+
     def cleanup_old_files(self):
         """Clean up old files based on configuration"""
         self.logger.info("Starting cleanup of old files...")
@@ -773,8 +789,16 @@ class SunsetScheduler:
                         self.logger.info(f"Video uploaded to Google Drive: {drive_result['filename']}")
                     else:
                         self.logger.warning("Google Drive upload failed")
+                        self.email_notifier.send_notification(
+                            f"Drive Upload Failed - {target_date}",
+                            f"Sunset video for {target_date} was created but Google Drive upload failed."
+                        )
                 except Exception as e:
                     self.logger.warning(f"Google Drive upload error: {e}")
+                    self.email_notifier.send_notification(
+                        f"Drive Upload Error - {target_date}",
+                        f"Error uploading sunset video to Google Drive:\n\n{str(e)}"
+                    )
 
             # Step 4.6: Post to Facebook with AI-generated caption
             try:
@@ -802,8 +826,16 @@ class SunsetScheduler:
                     self.logger.info("Successfully posted to Facebook")
                 else:
                     self.logger.warning("Facebook posting failed (non-critical)")
+                    self.email_notifier.send_notification(
+                        f"Facebook/Instagram Post Failed - {target_date}",
+                        f"Failed to post sunset timelapse for {target_date} to Facebook/Instagram."
+                    )
             except Exception as e:
                 self.logger.warning(f"Facebook posting error: {e} (non-critical)")
+                self.email_notifier.send_notification(
+                    f"Facebook/Instagram Post Error - {target_date}",
+                    f"Error posting sunset to Facebook/Instagram:\n\n{str(e)}"
+                )
 
             # Step 5: Upload to YouTube with SBS enhancements + weather/visual data
             upload_success = self.upload_to_youtube_with_sbs(
