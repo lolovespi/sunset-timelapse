@@ -106,17 +106,25 @@ class FacebookUploader:
         except Exception as e:
             self.logger.error(f"Failed to save tracking database: {e}")
 
-    def update_tracking_db(self, date_str: str, status: str, facebook_id: Optional[str] = None):
-        """Update tracking database with posting status"""
+    def update_tracking_db(self, date_str: str, status: str, facebook_id: Optional[str] = None,
+                           instagram_id: Optional[str] = None):
+        """Update tracking database with posting status.
+
+        Merges with existing entry so Facebook and Instagram tracking are independent.
+        """
         db = self.load_tracking_db()
 
-        entry = {
-            'status': status,
-            'updated_at': datetime.now(timezone.utc).isoformat()
-        }
+        entry = db.get(date_str, {})
+        entry['status'] = status
+        entry['updated_at'] = datetime.now(timezone.utc).isoformat()
 
         if facebook_id:
             entry['facebook_id'] = facebook_id
+            entry['facebook_posted_at'] = datetime.now(timezone.utc).isoformat()
+
+        if instagram_id:
+            entry['instagram_id'] = instagram_id
+            entry['instagram_posted_at'] = datetime.now(timezone.utc).isoformat()
 
         if status == 'posted':
             entry['posted_at'] = datetime.now(timezone.utc).isoformat()
@@ -487,30 +495,41 @@ Caption:"""
         """
         date_str = metadata.get('date', datetime.now().strftime('%Y-%m-%d'))
 
-        # Check if already posted
+        # Check what's already been posted (per-platform tracking)
         db = self.load_tracking_db()
-        if date_str in db and db[date_str].get('status') == 'posted':
-            self.logger.info(f"Sunset for {date_str} already posted to Facebook")
+        entry = db.get(date_str, {})
+        fb_already_posted = bool(entry.get('facebook_id'))
+        ig_already_posted = bool(entry.get('instagram_id'))
+
+        if fb_already_posted and ig_already_posted:
+            self.logger.info(f"Sunset for {date_str} already posted to both Facebook and Instagram")
             return True
 
         try:
-            # Generate caption
+            # Generate caption (needed for both platforms)
             self.logger.info("Generating caption with Anthropic API...")
             caption = self.generate_caption(metadata)
-
-            # Append hashtags
             full_caption = self.append_hashtags(caption)
 
-            # Post to Facebook
-            facebook_id = self.post_video(video_path, full_caption, date_str)
+            # Post to Facebook if not already done
+            facebook_id = None
+            if fb_already_posted:
+                self.logger.info(f"Facebook post for {date_str} already exists, skipping")
+                facebook_id = entry.get('facebook_id')
+            else:
+                facebook_id = self.post_video(video_path, full_caption, date_str)
 
-            # Post to Instagram (non-blocking)
-            try:
-                instagram_id = self.post_to_instagram(str(video_path), full_caption)
-                if instagram_id:
-                    self.logger.info(f"Instagram post successful: {instagram_id}")
-            except Exception as e:
-                self.logger.warning(f"Instagram posting failed (non-critical): {e}")
+            # Post to Instagram if not already done
+            if ig_already_posted:
+                self.logger.info(f"Instagram post for {date_str} already exists, skipping")
+            else:
+                try:
+                    instagram_id = self.post_to_instagram(str(video_path), full_caption)
+                    if instagram_id:
+                        self.logger.info(f"Instagram post successful: {instagram_id}")
+                        self.update_tracking_db(date_str, 'posted', instagram_id=instagram_id)
+                except Exception as e:
+                    self.logger.warning(f"Instagram posting failed (non-critical): {e}")
 
             return facebook_id is not None
 
