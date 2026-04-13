@@ -327,12 +327,26 @@ class SunsetScheduler:
             else:
                 start_time, end_time = self.sunset_calc.get_capture_window(target_date)
 
-            # Get SBS enhancements if report available
+            # Generate AI title to replace default "Sunset MM/DD/YY"
+            ai_title = None
+            try:
+                title_metadata = {
+                    'date': target_date.isoformat(),
+                    'capture_date': target_date.isoformat(),
+                }
+                if weather_block:
+                    title_metadata['weather'] = weather_block
+                if visual_block:
+                    title_metadata['visual_analysis'] = visual_block
+                ai_title = self.facebook_uploader.generate_youtube_title(title_metadata)
+            except Exception as e:
+                self.logger.warning(f"AI title generation failed: {e}")
+
+            # Get SBS description enhancement (skip title enhancement - AI title replaces it)
             title_enhancement = ""
             description_enhancement = ""
 
             if sbs_report:
-                title_enhancement = self.sbs_reporter.get_video_title_enhancement(target_date)
                 description_enhancement = self.sbs_reporter.get_video_description_enhancement(target_date)
 
             # Add weather and visual data to description
@@ -359,7 +373,8 @@ class SunsetScheduler:
             # Upload video with enhancements
             video_id = self.youtube_uploader.upload_video_with_sbs_enhancements(
                 video_path, target_date, start_time, end_time,
-                title_enhancement, description_enhancement, is_test
+                title_enhancement, description_enhancement, is_test,
+                title_override=ai_title
             )
             
             if video_id:

@@ -192,6 +192,67 @@ class FacebookUploader:
             self.logger.error(f"Failed to generate caption with Anthropic API: {e}")
             return self._build_fallback_caption(metadata)
 
+    def generate_youtube_title(self, metadata: Dict[str, Any]) -> str:
+        """
+        Generate a short AI title for YouTube (max ~70 chars).
+
+        Always includes the date. Falls back to "Sunset MM/DD/YY" if AI fails.
+        """
+        try:
+            from datetime import datetime as dt
+            date_str = metadata.get('date') or metadata.get('capture_date', '')
+            d = dt.fromisoformat(date_str) if date_str else dt.now()
+            date_display = d.strftime('%m/%d/%y')
+        except (ValueError, TypeError):
+            from datetime import datetime as dt
+            d = dt.now()
+            date_display = d.strftime('%m/%d/%y')
+
+        fallback = f"Sunset {date_display}"
+
+        if not self.anthropic_client:
+            return fallback
+
+        weather = metadata.get('weather') or {}
+        visual = metadata.get('visual_analysis') or {}
+
+        prompt = f"""Write a short YouTube video title (max 70 characters) for today's sunset timelapse.
+
+Date: {date_display}
+Weather: {weather.get('conditions', 'unknown')}, {weather.get('temperature_f', '?')}°F
+Sunset type: {visual.get('sunset_type', 'unknown')}
+Intensity: {visual.get('intensity', 'unknown')}
+
+Guidelines:
+- Must start with "Sunset {date_display} - " followed by a short descriptive phrase
+- Max 70 characters total
+- NO emojis
+- NO marketing superlatives like "SPECTACULAR", "BRILLIANT", "STUNNING"
+- Descriptive and factual, not hype
+- Draw from weather/visual details when interesting
+
+Return only the title, nothing else.
+
+Title:"""
+
+        try:
+            message = self.anthropic_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=50,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            title = message.content[0].text.strip().strip('"').strip()
+            # Enforce prefix and length
+            if not title.startswith(f"Sunset {date_display}"):
+                title = fallback
+            if len(title) > 100:
+                title = title[:97] + "..."
+            self.logger.info(f"Generated YouTube title: {title}")
+            return title
+        except Exception as e:
+            self.logger.warning(f"YouTube title generation failed: {e}")
+            return fallback
+
     def _build_caption_prompt(self, metadata: Dict[str, Any]) -> str:
         """Build the prompt for Anthropic API"""
         # Extract metadata fields
@@ -237,6 +298,8 @@ Guidelines:
 - Reference day of week or season when it feels natural
 - Vary your tone - don't sound formulaic
 - NEVER use "beautiful sunset" or other generic phrases
+- NEVER use the word "SPECTACULAR" or other marketing superlatives
+- NO emojis
 - NO hashtags (we add those separately)
 - 2-3 sentences max
 - Focus on what makes THIS sunset interesting or notable

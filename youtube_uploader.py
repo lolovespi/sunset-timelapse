@@ -351,7 +351,8 @@ Interval: 5 seconds
     def upload_video_with_sbs_enhancements(self, video_path: Path, video_date: date,
                                          start_time: datetime, end_time: datetime,
                                          title_enhancement: str = "", description_enhancement: str = "",
-                                         is_test: bool = False) -> Optional[str]:
+                                         is_test: bool = False,
+                                         title_override: Optional[str] = None) -> Optional[str]:
         """
         Upload video to YouTube with SBS enhancements to title and description
         
@@ -380,11 +381,13 @@ Interval: 5 seconds
         try:
             # Format metadata with SBS enhancements
             metadata = self.format_video_metadata(video_date, start_time, end_time, is_test)
-            
-            # Add SBS enhancements
-            if title_enhancement:
+
+            # Apply AI title override (takes precedence over default + SBS enhancement)
+            if title_override and not is_test:
+                metadata['snippet']['title'] = title_override
+            elif title_enhancement:
                 metadata['snippet']['title'] += title_enhancement
-                
+
             if description_enhancement:
                 metadata['snippet']['description'] += description_enhancement
             
