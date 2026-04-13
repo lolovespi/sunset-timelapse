@@ -22,6 +22,9 @@ from config_manager import get_config
 from sunset_calculator import SunsetCalculator
 from video_processor import VideoProcessor
 from youtube_uploader import YouTubeUploader
+from tempest_api import TempestAPI
+from visual_analyzer import VisualAnalyzer
+from facebook_uploader import FacebookUploader
 
 
 def sanitize_filename(filename: str) -> str:
@@ -60,6 +63,9 @@ class HistoricalRetrieval:
         self.sunset_calc = SunsetCalculator()
         self.video_processor = VideoProcessor()
         self.youtube_uploader = YouTubeUploader()
+        self.tempest_api = TempestAPI()
+        self.visual_analyzer = VisualAnalyzer()
+        self.facebook_uploader = FacebookUploader()
         
         # Camera settings
         self.ip = self.config.get('camera.ip')
@@ -899,8 +905,60 @@ class HistoricalRetrieval:
                         # Calculate start and end times for this date
                         sunset_start, sunset_end = self.sunset_calc.get_capture_window(current_date)
 
-                        self.youtube_uploader.upload_video(
-                            video_path, current_date, sunset_start, sunset_end
+                        # Gather historical weather + visual analysis for AI title/description
+                        weather_block = None
+                        visual_block = None
+                        try:
+                            sunset_hour = sunset_start.hour + 1
+                            weather_block = self.tempest_api.get_weather_block(current_date, sunset_hour)
+                        except Exception as e:
+                            self.logger.warning(f"Historical weather fetch failed: {e}")
+                        try:
+                            visual_block = self.visual_analyzer.analyze_video(video_path)
+                        except Exception as e:
+                            self.logger.warning(f"Visual analysis failed: {e}")
+
+                        # Generate AI title
+                        ai_title = None
+                        try:
+                            title_metadata = {
+                                'date': current_date.isoformat(),
+                                'capture_date': current_date.isoformat(),
+                            }
+                            if weather_block:
+                                title_metadata['weather'] = weather_block
+                            if visual_block:
+                                title_metadata['visual_analysis'] = visual_block
+                            ai_title = self.facebook_uploader.generate_youtube_title(title_metadata)
+                        except Exception as e:
+                            self.logger.warning(f"AI title generation failed: {e}")
+
+                        # Build description enhancement
+                        description_enhancement = ""
+                        if weather_block:
+                            description_enhancement += "\n\nWeather Conditions:"
+                            if 'conditions' in weather_block:
+                                description_enhancement += f"\n  {weather_block['conditions'].title()}"
+                            if 'temperature_f' in weather_block:
+                                description_enhancement += f"\n  Temperature: {weather_block['temperature_f']}°F"
+                            if 'humidity_pct' in weather_block:
+                                description_enhancement += f"\n  Humidity: {weather_block['humidity_pct']}%"
+                            if 'wind_speed_mph' in weather_block:
+                                description_enhancement += f"\n  Wind: {weather_block['wind_speed_mph']} mph"
+                            if weather_block.get('cloud_cover_pct') is not None:
+                                description_enhancement += f"\n  Cloud Cover: {weather_block['cloud_cover_pct']}%"
+                        if visual_block:
+                            description_enhancement += "\n\nVisual Analysis:"
+                            if 'sunset_type' in visual_block:
+                                description_enhancement += f"\n  Sunset Type: {visual_block['sunset_type'].title()}"
+                            if 'intensity' in visual_block:
+                                description_enhancement += f"\n  Intensity: {visual_block['intensity'].title()}"
+
+                        self.youtube_uploader.upload_video_with_sbs_enhancements(
+                            video_path, current_date, sunset_start, sunset_end,
+                            title_enhancement="",
+                            description_enhancement=description_enhancement,
+                            title_override=ai_title
                         )
                     except Exception as e:
                         self.logger.warning(f"YouTube upload failed for {current_date}: {e}")
