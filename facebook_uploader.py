@@ -216,20 +216,30 @@ class FacebookUploader:
         weather = metadata.get('weather') or {}
         visual = metadata.get('visual_analysis') or {}
 
-        prompt = f"""Write a short YouTube video title (max 70 characters) for today's sunset timelapse.
+        prompt = f"""Write a short YouTube video title for a sunset timelapse.
 
-Date: {date_display}
-Weather: {weather.get('conditions', 'unknown')}, {weather.get('temperature_f', '?')}°F
-Sunset type: {visual.get('sunset_type', 'unknown')}
-Intensity: {visual.get('intensity', 'unknown')}
+Available context (use only what makes a natural title):
+- Date: {date_display}
+- Sky conditions: {weather.get('conditions', 'unknown')}
+- Cloud cover: {weather.get('cloud_cover_pct', 'unknown')}%
+- Sunset type (from video analysis): {visual.get('sunset_type', 'unknown')}
+- Color intensity: {visual.get('intensity', 'unknown')}
+- Temperature: {weather.get('temperature_f', 'unknown')}°F
 
-Guidelines:
-- Must start with "Sunset {date_display} - " followed by a short descriptive phrase
-- Max 70 characters total
-- NO emojis
-- NO marketing superlatives like "SPECTACULAR", "BRILLIANT", "STUNNING"
-- Descriptive and factual, not hype
-- Draw from weather/visual details when interesting
+Rules:
+- Must start with exactly: "Sunset {date_display} - "
+- After the prefix, write 2-6 words describing what the sky looked like
+- Focus on visible SKY characteristics (clouds, colors, light quality)
+- Do NOT include temperature — it's not visible in a video
+- Do NOT include humidity or wind
+- Do NOT include numbers or percentages
+- NO emojis, NO superlatives (SPECTACULAR, BRILLIANT, STUNNING)
+- Natural descriptive English, not a list of data points
+- Examples of good titles:
+    "Sunset {date_display} - Dramatic Cloud Cover"
+    "Sunset {date_display} - Muted Overcast Sky"
+    "Sunset {date_display} - Golden Light Through Clouds"
+    "Sunset {date_display} - Clear Evening Sky"
 
 Return only the title, nothing else.
 
