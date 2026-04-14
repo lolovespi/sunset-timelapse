@@ -508,24 +508,44 @@ Caption:"""
                 self.logger.error("Instagram processing timed out")
                 return None
 
-            # Step 4: Publish the container
+            # Step 4: Publish the container (with retry for transient Meta errors)
             publish_url = f"{graph_url}/{self.instagram_account_id}/media_publish"
-            publish_response = requests.post(
-                publish_url,
-                data={
-                    'creation_id': container_id,
-                    'access_token': self.page_access_token
-                },
-                timeout=60
-            )
+            for publish_attempt in range(3):
+                if publish_attempt > 0:
+                    # Wait between retries - Instagram container sometimes needs more settle time
+                    wait = 30 * publish_attempt
+                    self.logger.info(f"Instagram publish retry {publish_attempt}/3 after {wait}s wait...")
+                    time.sleep(wait)
 
-            if publish_response.status_code == 200:
-                media_id = publish_response.json().get('id')
-                self.logger.info(f"Successfully posted to Instagram. Media ID: {media_id}")
-                return media_id
-            else:
-                self.logger.error(f"Instagram publish failed: {publish_response.text}")
-                return None
+                publish_response = requests.post(
+                    publish_url,
+                    data={
+                        'creation_id': container_id,
+                        'access_token': self.page_access_token
+                    },
+                    timeout=60
+                )
+
+                if publish_response.status_code == 200:
+                    media_id = publish_response.json().get('id')
+                    self.logger.info(f"Successfully posted to Instagram. Media ID: {media_id}")
+                    return media_id
+                else:
+                    # Check if it's the transient "unknown error" that usually resolves with retry
+                    try:
+                        err = publish_response.json().get('error', {})
+                        err_subcode = err.get('error_subcode')
+                        is_transient = err_subcode == 99 or err.get('code') == 1
+                    except (ValueError, AttributeError):
+                        is_transient = False
+
+                    self.logger.warning(f"Instagram publish attempt {publish_attempt + 1} failed: {publish_response.text}")
+                    if not is_transient:
+                        # Non-transient error, don't retry
+                        break
+
+            self.logger.error(f"Instagram publish failed after retries: {publish_response.text}")
+            return None
 
         except Exception as e:
             self.logger.error(f"Instagram posting error: {e}")
