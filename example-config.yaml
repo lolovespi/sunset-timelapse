@@ -148,3 +148,17 @@ meteor:
 
   # Storage
   retention_days: 30             # Keep meteor clips for this many days
+# Live streaming settings (Pi 5 + hardware H.264 encoder recommended)
+stream:
+  # Output resolution and bitrate for RTMP stream
+  width: 1920
+  height: 1080
+  video_bitrate_kbps: 4000     # 4 Mbps is a good default for 1080p
+  fps: 20                      # Matches camera max framerate
+  use_hw_encoder: true         # Use h264_v4l2m2m on Pi 5
+
+  # Camera RTSP path (main is highest quality)
+  rtsp_path: "h264Preview_01_main"
+
+  # Safety limits
+  max_duration_minutes: 240    # 4-hour cap per stream session

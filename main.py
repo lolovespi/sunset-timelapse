@@ -556,6 +556,33 @@ def cmd_config(args):
             sys.exit(1)
 
 
+def cmd_stream(args):
+    """Live stream camera to Facebook/YouTube"""
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
+    from live_streamer import LiveStreamCoordinator
+
+    platforms = [p.strip().lower() for p in args.platforms.split(',') if p.strip()]
+    valid = {'facebook', 'youtube'}
+    invalid = [p for p in platforms if p not in valid]
+    if invalid:
+        logger.error(f"Unknown platform(s): {invalid}. Valid: {sorted(valid)}")
+        sys.exit(1)
+
+    logger.info(f"Starting live stream: platforms={platforms}, duration={args.duration}min, test={args.test}")
+
+    coordinator = LiveStreamCoordinator()
+    success = coordinator.stream(
+        duration_minutes=args.duration,
+        platforms=platforms,
+        title=args.title,
+        description=args.description,
+        test_mode=args.test,
+    )
+    sys.exit(0 if success else 1)
+
+
 def cmd_meteor(args):
     """Search for and detect meteors in video footage"""
     setup_logging()
@@ -926,6 +953,20 @@ Examples:
     meteor_parser.add_argument('--stats', action='store_true',
                               help='Show meteor detection statistics')
     meteor_parser.set_defaults(func=cmd_meteor)
+
+    # Stream command (live streaming to Facebook/YouTube)
+    stream_parser = subparsers.add_parser('stream', help='Live stream camera to Facebook/YouTube')
+    stream_parser.add_argument('--duration', type=int, default=30,
+                              help='Stream duration in minutes (default: 30, max: 240)')
+    stream_parser.add_argument('--platforms', type=str, default='facebook',
+                              help='Comma-separated platforms: facebook,youtube (default: facebook)')
+    stream_parser.add_argument('--title', type=str, default=None,
+                              help='Broadcast title (default: auto-generated)')
+    stream_parser.add_argument('--description', type=str, default=None,
+                              help='Broadcast description')
+    stream_parser.add_argument('--test', action='store_true',
+                              help='Test mode: create unpublished broadcast (no public viewers)')
+    stream_parser.set_defaults(func=cmd_stream)
 
     # Parse arguments
     args = parser.parse_args()
