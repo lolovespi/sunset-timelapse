@@ -26,6 +26,7 @@ class FrameMetrics:
     sky_saturation: float
     gradient_intensity: float
     brightness_mean: float
+    warmth: float  # Fraction of horizon pixels with warm saturated color (0-1)
     processing_time_ms: float
 
 
@@ -40,6 +41,7 @@ class ChunkMetrics:
     color_variation_range: float
     temporal_smoothness: float
     golden_hour_bonus: float
+    avg_warmth: float  # Mean warmth across frames in chunk
     frame_count: int
     avg_processing_time_ms: float
 
@@ -107,10 +109,11 @@ class SunsetBrillianceScore:
             sky_saturation = self._analyze_sky_saturation(frame_resized)
             gradient_intensity = self._calculate_gradient_intensity(frame_resized)
             brightness_mean = np.mean(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY))
-            
+            warmth = self._calculate_warmth(frame_resized)
+
             processing_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
             self.processing_times.append(processing_time)
-            
+
             return FrameMetrics(
                 frame_number=frame_number,
                 timestamp_offset=timestamp_offset,
@@ -119,6 +122,7 @@ class SunsetBrillianceScore:
                 sky_saturation=sky_saturation,
                 gradient_intensity=gradient_intensity,
                 brightness_mean=brightness_mean,
+                warmth=warmth,
                 processing_time_ms=processing_time
             )
             
@@ -239,10 +243,52 @@ class SunsetBrillianceScore:
         
         # Calculate mean gradient intensity
         gradient_intensity = np.mean(sky_gradient)
-        
+
         return float(gradient_intensity)
-    
-    def analyze_chunk(self, frame_metrics: List[FrameMetrics], 
+
+    def _calculate_warmth(self, frame: np.ndarray) -> float:
+        """
+        Measure fraction of horizon-region pixels with warm saturated color.
+
+        Directly rewards the red/orange/pink tones that make a sunset
+        memorable. Focuses on the horizon band (bottom portion of the
+        sky region) where sunset color concentrates.
+
+        Returns:
+            Float 0.0-1.0 representing fraction of "warm sunset" pixels
+        """
+        height = frame.shape[0]
+
+        # Horizon band: from 30% down to sky_region_ratio (skip top of sky,
+        # which rarely has warm color, and skip ground/buildings below)
+        band_top = int(height * 0.3)
+        band_bottom = int(height * self.sky_region_ratio)
+        if band_bottom <= band_top:
+            return 0.0
+        horizon_band = frame[band_top:band_bottom, :]
+
+        hsv = cv2.cvtColor(horizon_band, cv2.COLOR_BGR2HSV)
+        h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+        # Warm hue mask: OpenCV hue is 0-179. Warm range = reds/oranges/pinks/magentas.
+        # 0-25 covers red→orange→yellow-orange
+        # 160-179 covers magenta→red (wraps around)
+        warm_hue = (h <= 25) | (h >= 160)
+
+        # Require meaningful saturation (>= 0.3 of 255 = 76) to skip desaturated sky
+        saturated = s >= 76
+
+        # Require meaningful brightness (exclude near-black shadow pixels)
+        bright_enough = v >= 50
+
+        warm_pixels = warm_hue & saturated & bright_enough
+        total_pixels = h.size
+        if total_pixels == 0:
+            return 0.0
+
+        return float(np.sum(warm_pixels) / total_pixels)
+
+    def analyze_chunk(self, frame_metrics: List[FrameMetrics],
                      chunk_number: int, sunset_offset_minutes: float = 0) -> ChunkMetrics:
         """
         Analyze 15-minute chunk and calculate brilliance score
@@ -262,9 +308,10 @@ class SunsetBrillianceScore:
                 brilliance_score=0.0,
                 peak_frames=[], color_variation_range=0.0,
                 temporal_smoothness=0.0, golden_hour_bonus=0.0,
+                avg_warmth=0.0,
                 frame_count=0, avg_processing_time_ms=0.0
             )
-        
+
         try:
             # Extract metric arrays
             colorfulness_values = [m.colorfulness for m in frame_metrics]
@@ -272,12 +319,13 @@ class SunsetBrillianceScore:
             saturations = [m.sky_saturation for m in frame_metrics]
             gradients = [m.gradient_intensity for m in frame_metrics]
             brightness_values = [m.brightness_mean for m in frame_metrics]
+            warmth_values = [m.warmth for m in frame_metrics]
             processing_times = [m.processing_time_ms for m in frame_metrics]
-            
+
             # Core brilliance calculation
             brilliance_score = self._calculate_brilliance_score(
-                colorfulness_values, saturations, gradients, 
-                color_temps, brightness_values
+                colorfulness_values, saturations, gradients,
+                color_temps, brightness_values, warmth_values
             )
             
             # Identify peak frames (top 10% colorfulness)
@@ -308,51 +356,62 @@ class SunsetBrillianceScore:
                 color_variation_range=color_variation_range,
                 temporal_smoothness=temporal_smoothness,
                 golden_hour_bonus=golden_hour_bonus,
+                avg_warmth=float(np.mean(warmth_values)),
                 frame_count=len(frame_metrics),
                 avg_processing_time_ms=np.mean(processing_times)
             )
-            
+
         except Exception as e:
             self.logger.error(f"Chunk analysis failed: {e}")
             return ChunkMetrics(
                 chunk_number=chunk_number, start_offset=0, end_offset=0,
                 brilliance_score=0.0, peak_frames=[], color_variation_range=0.0,
                 temporal_smoothness=0.0, golden_hour_bonus=0.0,
+                avg_warmth=0.0,
                 frame_count=len(frame_metrics), avg_processing_time_ms=0.0
             )
     
     def _calculate_brilliance_score(self, colorfulness_values: List[float],
                                   saturations: List[float], gradients: List[float],
-                                  color_temps: List[float], brightness_values: List[float]) -> float:
+                                  color_temps: List[float], brightness_values: List[float],
+                                  warmth_values: List[float]) -> float:
         """
-        Calculate weighted brilliance score from component metrics
-        Tuned for sunset conditions with Pi-optimized weights
+        Calculate weighted brilliance score from component metrics.
+
+        Rebalanced to reward the warm saturated color that defines a
+        memorable sunset, rather than over-rewarding gradient (transitions)
+        which can fire on any cluttered sky.
         """
-        # Component weights (tuned for sunset brilliance)
+        # Component weights — rebalanced for exceptional-sunset detection
         weights = {
-            'colorfulness': 0.40,     # Primary metric - Hasler-Süsstrunk
-            'saturation': 0.25,       # Sky color richness
-            'gradient': 0.20,         # Color transition drama
-            'color_temp': 0.10,       # Warmth bonus for golden hour
+            'warmth': 0.30,           # Fraction of sky with warm saturated color
+            'saturation': 0.30,       # Sky color richness
+            'colorfulness': 0.20,     # Hasler-Süsstrunk perception metric
+            'color_temp': 0.10,       # Warm color temperature
+            'gradient': 0.05,         # Minor reward for color transitions
             'brightness': 0.05        # Avoid over/under exposure
         }
-        
+
         # Normalize and score each component
-        colorfulness_score = np.mean(colorfulness_values) / 100.0  # Typical range 0-150
+        warmth_score = np.mean(warmth_values)  # Already 0-1 range
+        colorfulness_score = np.clip(np.mean(colorfulness_values) / 80.0, 0, 1)  # Calibrated range
         saturation_score = np.mean(saturations)  # Already 0-1 range
         gradient_score = np.clip(np.mean(gradients) / 50.0, 0, 1)  # Typical range 0-100
-        
-        # Color temperature scoring (warm colors get higher scores)
+
+        # Color temperature scoring — sweet spot is golden-pink (3000-4500K),
+        # very deep reds (<2500K) often mean camera is pushing red channel at dusk
         avg_temp = np.mean(color_temps)
-        if avg_temp < 3000:  # Very warm (sunset peak)
+        if 3000 <= avg_temp <= 4500:  # Classic golden-pink sunset
             temp_score = 1.0
-        elif avg_temp < 4000:  # Warm
+        elif 2500 <= avg_temp < 3000 or 4500 < avg_temp <= 5000:  # Near sweet spot
             temp_score = 0.8
-        elif avg_temp < 5000:  # Neutral
-            temp_score = 0.5
+        elif avg_temp < 2500:  # Very warm (valid but often post-peak)
+            temp_score = 0.6
+        elif avg_temp <= 5500:  # Neutral
+            temp_score = 0.4
         else:  # Cool
             temp_score = 0.2
-            
+
         # Brightness scoring (avoid extremes)
         avg_brightness = np.mean(brightness_values)
         if 50 <= avg_brightness <= 200:  # Good exposure range
@@ -361,16 +420,17 @@ class SunsetBrillianceScore:
             brightness_score = 0.3
         else:
             brightness_score = 0.7
-            
+
         # Weighted combination
         brilliance_score = (
-            weights['colorfulness'] * colorfulness_score +
+            weights['warmth'] * warmth_score +
             weights['saturation'] * saturation_score +
-            weights['gradient'] * gradient_score +
+            weights['colorfulness'] * colorfulness_score +
             weights['color_temp'] * temp_score +
+            weights['gradient'] * gradient_score +
             weights['brightness'] * brightness_score
         )
-        
+
         # Scale to 0-100 range for intuitive scoring
         return float(np.clip(brilliance_score * 100, 0, 100))
     
@@ -456,15 +516,35 @@ class SunsetBrillianceScore:
                 'avg_processing_time_ms': 0.0,
                 'quality_grade': 'F'
             }
-        
+
         # Calculate daily metrics
         chunk_scores = [c.brilliance_score for c in chunk_metrics]
-        daily_score = np.mean(chunk_scores)
-        peak_chunk_idx = np.argmax(chunk_scores)
+        peak_chunk_idx = int(np.argmax(chunk_scores))
+        peak_score = chunk_scores[peak_chunk_idx]
+        mean_score = float(np.mean(chunk_scores))
         total_frames = sum(c.frame_count for c in chunk_metrics)
         avg_processing_time = np.mean([c.avg_processing_time_ms for c in chunk_metrics])
-        
-        # Assign quality grade
+
+        # Peak-weighted daily score: reward sunsets with a brilliant peak moment
+        # rather than punishing them for flat gray chunks before/after.
+        daily_score = 0.6 * peak_score + 0.4 * mean_score
+
+        # Sustained-color bonus: if 3+ consecutive chunks have meaningful warm
+        # color (avg_warmth >= 0.1), the sunset sustained a real color show.
+        warmth_threshold = 0.1
+        max_streak = 0
+        current_streak = 0
+        for c in sorted(chunk_metrics, key=lambda x: x.chunk_number):
+            if c.avg_warmth >= warmth_threshold:
+                current_streak += 1
+                max_streak = max(max_streak, current_streak)
+            else:
+                current_streak = 0
+
+        if max_streak >= 3:
+            daily_score = min(100.0, daily_score * 1.1)
+
+        # Assign quality grade (thresholds re-calibrated for new scale)
         if daily_score >= 80:
             grade = 'A'
         elif daily_score >= 70:
@@ -475,11 +555,13 @@ class SunsetBrillianceScore:
             grade = 'D'
         else:
             grade = 'F'
-        
+
         return {
             'daily_brilliance_score': float(daily_score),
             'peak_chunk': chunk_metrics[peak_chunk_idx].chunk_number,
-            'peak_chunk_score': chunk_scores[peak_chunk_idx],
+            'peak_chunk_score': float(peak_score),
+            'mean_chunk_score': mean_score,
+            'sustained_warmth_streak': max_streak,
             'chunk_scores': chunk_scores,
             'total_frames': total_frames,
             'avg_processing_time_ms': float(avg_processing_time),
