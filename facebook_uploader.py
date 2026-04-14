@@ -302,17 +302,24 @@ Visual analysis:
 - Quality score (SBS): {sbs_score}/100 (Grade: {sbs_grade})
 
 Guidelines:
-- Write like a real person, not a marketing post
-- Be conversational and casual
-- Draw naturally from interesting weather or visual details (dramatic skies, unusual temperature, heavy clouds, etc.)
-- Reference day of week or season when it feels natural
-- Vary your tone - don't sound formulaic
-- NEVER use "beautiful sunset" or other generic phrases
-- NEVER use the word "SPECTACULAR" or other marketing superlatives
+- Write like an observer making a simple, honest comment
+- Restrained and understated — NOT effusive, NOT dramatic, NOT over-the-top
+- Write in plain sentences with normal capitalization
+- Do NOT use slang intensifiers: "hit different", "calm as hell", "honestly", "literally", "just different"
+- Do NOT use hype words: "amazing", "incredible", "gorgeous", "stunning", "breathtaking", "epic", "wild"
+- Do NOT use marketing language or superlatives like SPECTACULAR, BRILLIANT
+- Do NOT say "beautiful sunset" or other generic phrases
+- Do NOT try to be clever or poetic — just describe what was visible
+- Reference the day of week or season only if it adds something meaningful
 - NO emojis
 - NO hashtags (we add those separately)
-- 2-3 sentences max
-- Focus on what makes THIS sunset interesting or notable
+- 1-2 short sentences maximum
+- If the sunset was muted/overcast, say so plainly — don't try to make it sound dramatic
+
+Good examples:
+  "Soft overcast light tonight, the sun just a pale disc behind the clouds."
+  "Cloud cover broke up just before sunset. A few minutes of warm color before the light faded."
+  "Quiet spring evening. Mostly gray, low contrast."
 
 Caption:"""
 
