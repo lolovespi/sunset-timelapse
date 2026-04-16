@@ -16,6 +16,7 @@ from typing import List, Optional
 from config_manager import get_config
 from email_notifier import EmailNotifier
 from live_facebook import FacebookLive
+from live_youtube import YouTubeLive
 from rtmp_streamer import RTMPStreamer
 
 
@@ -29,6 +30,7 @@ class LiveStreamCoordinator:
 
         self.streamer = RTMPStreamer()
         self.facebook: Optional[FacebookLive] = None
+        self.youtube: Optional[YouTubeLive] = None
         self._shutdown_requested = False
 
     def stream(self, duration_minutes: int, platforms: List[str],
@@ -77,7 +79,24 @@ class LiveStreamCoordinator:
                 self.logger.error(f"Facebook setup error: {e}")
 
         if 'youtube' in platforms:
-            self.logger.warning("YouTube Live not yet implemented - skipping")
+            try:
+                self.youtube = YouTubeLive()
+                privacy = 'unlisted' if test_mode else 'public'
+                yt_url = self.youtube.create_broadcast(
+                    title=title, description=description,
+                    privacy_status=privacy, made_for_kids=False,
+                )
+                if yt_url:
+                    rtmp_urls.append(yt_url)
+                    self.logger.info(f"YouTube broadcast ready (privacy={privacy})")
+                else:
+                    self.logger.error("YouTube broadcast creation failed")
+                    self.email.send_notification(
+                        "Live Stream Failed - YouTube Setup",
+                        f"Could not create YouTube Live broadcast at {datetime.now().isoformat()}"
+                    )
+            except Exception as e:
+                self.logger.error(f"YouTube setup error: {e}")
 
         if not rtmp_urls:
             self.logger.error("No RTMP endpoints available, aborting stream")
@@ -133,16 +152,30 @@ class LiveStreamCoordinator:
             except Exception as e:
                 self.logger.warning(f"Facebook end broadcast error: {e}")
 
+        if self.youtube:
+            try:
+                self.youtube.end_broadcast()
+                watch = self.youtube.watch_url()
+                if watch:
+                    self.logger.info(f"YouTube Live: {watch}")
+            except Exception as e:
+                self.logger.warning(f"YouTube end broadcast error: {e}")
+
     def _notify_started(self, title: str, duration_minutes: int):
         """Send email notification that stream started."""
-        fb_permalink = self.facebook.permalink() if self.facebook else None
         body_parts = [
             f"Live stream started at {datetime.now().strftime('%Y-%m-%d %I:%M %p')}",
             f"Title: {title}",
             f"Duration: up to {duration_minutes} minutes",
         ]
-        if fb_permalink:
-            body_parts.append(f"Facebook: {fb_permalink}")
+        if self.facebook:
+            fb = self.facebook.permalink()
+            if fb:
+                body_parts.append(f"Facebook: {fb}")
+        if self.youtube:
+            yt = self.youtube.watch_url()
+            if yt:
+                body_parts.append(f"YouTube: {yt}")
         try:
             self.email.send_notification("Live Stream Started", "\n".join(body_parts))
         except Exception:
