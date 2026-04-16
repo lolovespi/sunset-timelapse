@@ -32,14 +32,17 @@ class RTMPStreamer:
         self.rtsp_port = self.config.get('camera.rtsp_port', 554)
         self.camera_username, self.camera_password = self.config.get_camera_credentials()
 
-        # Streaming settings (with sensible defaults for Pi 5 + 2560x1440@20)
+        # Streaming settings
         stream_cfg = self.config.get('stream', {}) or {}
+        # Mode: "copy" (default, zero CPU, keeps camera resolution) or "reencode"
+        self.mode = stream_cfg.get('mode', 'copy')
         self.output_width = stream_cfg.get('width', 1920)
         self.output_height = stream_cfg.get('height', 1080)
         self.video_bitrate = stream_cfg.get('video_bitrate_kbps', 4000)
         self.fps = stream_cfg.get('fps', 20)
-        self.use_hw_encoder = stream_cfg.get('use_hw_encoder', True)
         self.rtsp_path = stream_cfg.get('rtsp_path', 'h264Preview_01_main')
+        # libx264 preset: ultrafast/superfast/veryfast/faster/fast/medium
+        self.x264_preset = stream_cfg.get('x264_preset', 'veryfast')
 
     def _build_rtsp_url(self) -> str:
         """Build RTSP URL with properly-escaped credentials."""
@@ -53,7 +56,6 @@ class RTMPStreamer:
             raise ValueError("At least one RTMP URL required")
 
         rtsp_url = self._build_rtsp_url()
-        encoder = 'h264_v4l2m2m' if self.use_hw_encoder else 'libx264'
 
         cmd = [
             'ffmpeg',
@@ -62,22 +64,29 @@ class RTMPStreamer:
             # Input
             '-rtsp_transport', 'tcp',
             '-i', rtsp_url,
-            # Filter: scale to output resolution
-            '-vf', f'scale={self.output_width}:{self.output_height}',
-            # Video encode
-            '-c:v', encoder,
-            '-b:v', f'{self.video_bitrate}k',
-            '-maxrate', f'{self.video_bitrate}k',
-            '-bufsize', f'{self.video_bitrate * 2}k',
-            '-g', str(self.fps * 2),  # Keyframe every 2s
-            '-r', str(self.fps),
-            # No audio
-            '-an',
         ]
 
-        # Pixel format required by v4l2m2m encoder
-        if self.use_hw_encoder:
-            cmd.extend(['-pix_fmt', 'yuv420p'])
+        if self.mode == 'copy':
+            # Stream-copy: no re-encode. Zero CPU, keeps camera resolution/fps.
+            # Camera already outputs H.264 so this just repackages into FLV.
+            cmd.extend(['-c:v', 'copy'])
+        else:
+            # Software re-encode with libx264 (Pi 5 has no real HW encoder)
+            cmd.extend([
+                '-vf', f'scale={self.output_width}:{self.output_height}',
+                '-c:v', 'libx264',
+                '-preset', self.x264_preset,
+                '-tune', 'zerolatency',
+                '-pix_fmt', 'yuv420p',
+                '-b:v', f'{self.video_bitrate}k',
+                '-maxrate', f'{self.video_bitrate}k',
+                '-bufsize', f'{self.video_bitrate * 2}k',
+                '-g', str(self.fps * 2),  # Keyframe every 2s
+                '-r', str(self.fps),
+            ])
+
+        # No audio
+        cmd.append('-an')
 
         if len(rtmp_urls) == 1:
             cmd.extend(['-f', 'flv', rtmp_urls[0]])
