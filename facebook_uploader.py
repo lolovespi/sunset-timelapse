@@ -143,17 +143,18 @@ class FacebookUploader:
         except (ValueError, TypeError):
             date_display = date_str or 'today'
 
-        caption = f"Sunset timelapse from Pelham, Alabama on {date_display}."
-
         weather = metadata.get('weather')
+        parts = []
         if weather:
-            parts = []
             if weather.get('conditions'):
-                parts.append(weather['conditions'].title())
+                parts.append(weather['conditions'])
             if weather.get('temperature_f') is not None:
                 parts.append(f"{weather['temperature_f']}°F")
-            if parts:
-                caption += f" {', '.join(parts)}."
+
+        if parts:
+            caption = f"{date_display}, Pelham, AL. {', '.join(parts)}. Camera: Reolink RLC810-WA"
+        else:
+            caption = f"{date_display}, Pelham, AL. Camera: Reolink RLC810-WA"
 
         return caption
 
@@ -216,32 +217,23 @@ class FacebookUploader:
         weather = metadata.get('weather') or {}
         visual = metadata.get('visual_analysis') or {}
 
-        prompt = f"""Write a short YouTube video title for a sunset timelapse.
+        prompt = f"""Write a YouTube title for a sunset timelapse video.
 
-Available context (use only what makes a natural title):
+Data:
 - Date: {date_display}
-- Sky conditions: {weather.get('conditions', 'unknown')}
-- Cloud cover: {weather.get('cloud_cover_pct', 'unknown')}%
-- Sunset type (from video analysis): {visual.get('sunset_type', 'unknown')}
-- Color intensity: {visual.get('intensity', 'unknown')}
-- Temperature: {weather.get('temperature_f', 'unknown')}°F
+- Sky: {weather.get('conditions', 'unknown')}, {visual.get('sunset_type', 'unknown')}, {visual.get('intensity', 'unknown')} intensity
 
-Rules:
-- Must start with exactly: "Sunset {date_display} - "
-- After the prefix, write 2-6 words describing what the sky looked like
-- Focus on visible SKY characteristics (clouds, colors, light quality)
-- Do NOT include temperature — it's not visible in a video
-- Do NOT include humidity or wind
-- Do NOT include numbers or percentages
-- NO emojis, NO superlatives (SPECTACULAR, BRILLIANT, STUNNING)
-- Natural descriptive English, not a list of data points
-- Examples of good titles:
-    "Sunset {date_display} - Dramatic Cloud Cover"
-    "Sunset {date_display} - Muted Overcast Sky"
-    "Sunset {date_display} - Golden Light Through Clouds"
-    "Sunset {date_display} - Clear Evening Sky"
+Format: "Sunset {date_display} - " followed by 2-5 words about the sky.
+Direct and plain. No hype. Vary the phrasing — don't reuse "muted" every day.
 
-Return only the title, nothing else.
+Examples:
+  "Sunset {date_display} - Flat Gray, No Color"
+  "Sunset {date_display} - Clouds Broke at the Horizon"
+  "Sunset {date_display} - Clear Sky, Quick Fade"
+  "Sunset {date_display} - Low Overcast"
+  "Sunset {date_display} - Good Color Tonight"
+
+Return only the title.
 
 Title:"""
 
@@ -307,32 +299,36 @@ Title:"""
         sunset_type = visual.get('sunset_type', 'unknown')
         intensity = visual.get('intensity', 'unknown')
 
-        prompt = f"""Write a short caption for a sunset timelapse video. This caption will be used on YouTube, Facebook, and Instagram.
+        prompt = f"""Write a short social media caption for a daily sunset timelapse video from Pelham, Alabama.
 
-Date: {date_display}
-Location: Pelham, Alabama
-Camera: Reolink RLC810-WA, 5-second interval timelapse
-Weather at sunset: {weather_line}
-Sky appearance: {sunset_type}, {intensity} intensity
+Data for this sunset:
+- Date: {date_display}
+- Weather: {weather_line}
+- Sky: {sunset_type}, {intensity} intensity
 
-The caption MUST include:
-1. The date ({date_display})
-2. Location (Pelham, Alabama)
-3. A brief weather/sky observation based on the data above
+VOICE:
+- Direct, dry, observational. No performative enthusiasm.
+- Short sentences. No filler.
+- Never apologize for an unremarkable sunset. Just describe it honestly.
+- Sound like a real person who watches sunsets regularly and knows the difference between a good one and a fine one.
 
-Rules:
-- 2-3 short sentences
-- Factual and understated — describe what was visible, nothing more
-- Do NOT claim rain, storms, or weather events unless "rainy" or "stormy" appears in both the weather conditions AND the sky appearance confirms it
-- Do NOT use slang, hype words, emojis, or hashtags
-- Do NOT say "beautiful", "stunning", "gorgeous", "amazing", "epic"
-- If the sunset was muted/overcast, say so plainly
-- Include "Camera: Reolink RLC810-WA" at the end
+RULES:
+- 1-3 sentences max
+- Describe what actually happened: sky conditions, light, temperature if notable
+- Include the date and "Pelham, AL" naturally in the text
+- End with "Camera: Reolink RLC810-WA" on its own line
+- Vary the structure. Don't start with "Sunset timelapse from..."
+- Do NOT claim weather events (rain, storms) unless the data explicitly confirms it
+- No emojis, no hashtags
+- Do NOT use: "hit different", "still worth watching", "in their own way", "nothing dramatic"
+- Do NOT use "muted" in every caption — use alternatives like flat, subdued, low-contrast, gray, washed out, quiet
+- Do NOT oversell an ordinary sunset
 
 Good examples:
-  "Sunset timelapse from Pelham, Alabama on April 15, 2026. Mostly cloudy skies at 72°F with some warm color breaking through near the horizon. Camera: Reolink RLC810-WA"
-  "April 12, 2026 sunset from Pelham, AL. Clear sky, 68°F, the light faded quickly with little cloud cover to catch the color. Camera: Reolink RLC810-WA"
-  "Overcast evening in Pelham, Alabama on April 18, 2026. Flat gray sky, 74°F, minimal color. Camera: Reolink RLC810-WA"
+  "Clouds sat low over Pelham, AL tonight. {date_display}. Flat light, no color to speak of. Camera: Reolink RLC810-WA"
+  "{date_display} — partly cloudy, {temp}°F. Some orange near the horizon but it didn't last. Pelham, AL. Camera: Reolink RLC810-WA"
+  "Clear sky in Pelham tonight, {date_display}. Sun dropped fast with nothing to catch the light. Camera: Reolink RLC810-WA"
+  "Good color tonight. Clouds broke up right at sunset and the whole horizon lit up. {date_display}, Pelham, AL. Camera: Reolink RLC810-WA"
 
 Caption:"""
 
