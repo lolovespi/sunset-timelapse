@@ -303,7 +303,8 @@ class SunsetScheduler:
                                   actual_end_time: datetime = None,
                                   is_test: bool = False,
                                   weather_block: Optional[Dict] = None,
-                                  visual_block: Optional[Dict] = None) -> bool:
+                                  visual_block: Optional[Dict] = None,
+                                  description_override: Optional[str] = None) -> bool:
         """
         Upload video to YouTube with SBS-enhanced title and description
 
@@ -374,7 +375,8 @@ class SunsetScheduler:
             video_id = self.youtube_uploader.upload_video_with_sbs_enhancements(
                 video_path, target_date, start_time, end_time,
                 title_enhancement, description_enhancement, is_test,
-                title_override=ai_title
+                title_override=ai_title,
+                description_override=description_override
             )
             
             if video_id:
@@ -599,37 +601,41 @@ class SunsetScheduler:
             if created_videos:
                 self.logger.info(f"✓ Successfully recovered footage for {yesterday} via historical retrieval")
 
-                # Upload to Google Drive with full metadata (weather, visual analysis)
+                video_path = created_videos[0]
+                sunset_start, sunset_end = self.sunset_calc.get_capture_window(yesterday)
+
+                # Gather weather and visual data for all platforms
+                weather_block = None
+                visual_block = None
+                try:
+                    sunset_hour = sunset_start.hour + 1
+                    weather_block = self.tempest_api.get_weather_block(yesterday, sunset_hour)
+                    if weather_block:
+                        self.logger.info(f"Recovery: Historical weather added: {weather_block['conditions']}, "
+                                       f"{weather_block['temperature_f']}°F (observed {weather_block['observed_at']})")
+                except Exception as e:
+                    self.logger.warning(f"Recovery: Failed to fetch weather data: {e}")
+
+                try:
+                    visual_block = self.visual_analyzer.analyze_video(video_path)
+                    if visual_block:
+                        self.logger.info(f"Recovery: Visual analysis added: {visual_block['sunset_type']}")
+                except Exception as e:
+                    self.logger.warning(f"Recovery: Visual analysis failed: {e}")
+
+                # Upload to Google Drive
                 drive_enabled = self.config.get('drive.enabled', False)
                 if drive_enabled:
                     try:
-                        video_path = created_videos[0]
-                        sunset_start, sunset_end = self.sunset_calc.get_capture_window(yesterday)
                         drive_metadata = {
                             'sunset_start': sunset_start.isoformat(),
                             'sunset_end': sunset_end.isoformat(),
                             'capture_date': yesterday.isoformat()
                         }
-
-                        # Add historical weather data from sunset time
-                        try:
-                            sunset_hour = sunset_start.hour + 1  # approximate sunset is 1h into window
-                            weather_block = self.tempest_api.get_weather_block(yesterday, sunset_hour)
-                            if weather_block:
-                                drive_metadata['weather'] = weather_block
-                                self.logger.info(f"Recovery: Historical weather added: {weather_block['conditions']}, "
-                                               f"{weather_block['temperature_f']}°F (observed {weather_block['observed_at']})")
-                        except Exception as e:
-                            self.logger.warning(f"Recovery: Failed to fetch weather data: {e}")
-
-                        # Add visual analysis
-                        try:
-                            visual_block = self.visual_analyzer.analyze_video(video_path)
-                            if visual_block:
-                                drive_metadata['visual_analysis'] = visual_block
-                                self.logger.info(f"Recovery: Visual analysis added: {visual_block['sunset_type']}")
-                        except Exception as e:
-                            self.logger.warning(f"Recovery: Visual analysis failed: {e}")
+                        if weather_block:
+                            drive_metadata['weather'] = weather_block
+                        if visual_block:
+                            drive_metadata['visual_analysis'] = visual_block
 
                         drive_result = self.drive_uploader.upload_video(video_path, yesterday, drive_metadata)
                         if drive_result:
@@ -646,6 +652,30 @@ class SunsetScheduler:
                             f"Recovery: Drive Upload Error - {yesterday}",
                             f"Error uploading recovered video to Google Drive:\n\n{str(e)}"
                         )
+
+                # Post to Facebook + Instagram with shared caption
+                try:
+                    social_metadata = {
+                        'date': yesterday.isoformat(),
+                        'capture_date': yesterday.isoformat(),
+                    }
+                    if weather_block:
+                        social_metadata['weather'] = weather_block
+                    if visual_block:
+                        social_metadata['visual_analysis'] = visual_block
+
+                    shared_caption = self.facebook_uploader.generate_caption(social_metadata)
+                    self.logger.info(f"Recovery: Shared caption: {shared_caption}")
+
+                    fb_success = self.facebook_uploader.post_sunset(
+                        video_path, social_metadata, caption_override=shared_caption
+                    )
+                    if fb_success:
+                        self.logger.info("Recovery: Posted to Facebook/Instagram")
+                    else:
+                        self.logger.warning("Recovery: Facebook/Instagram posting failed")
+                except Exception as e:
+                    self.logger.warning(f"Recovery: Facebook/Instagram error: {e}")
 
                 self.email_notifier.send_notification(
                     f"Automatic Recovery: {yesterday}",
@@ -815,28 +845,29 @@ class SunsetScheduler:
                         f"Error uploading sunset video to Google Drive:\n\n{str(e)}"
                     )
 
-            # Step 4.6: Post to Facebook with AI-generated caption
+            # Step 4.6: Generate ONE caption for all platforms
+            social_metadata = {
+                'date': target_date.isoformat(),
+                'capture_date': target_date.isoformat(),
+            }
+            if sbs_report:
+                social_metadata.update({
+                    'sbs_score': sbs_report['summary']['daily_brilliance_score'],
+                    'sbs_grade': sbs_report['summary']['quality_grade']
+                })
+            if weather_block:
+                social_metadata['weather'] = weather_block
+            if visual_block:
+                social_metadata['visual_analysis'] = visual_block
+
+            shared_caption = self.facebook_uploader.generate_caption(social_metadata)
+            self.logger.info(f"Shared caption: {shared_caption}")
+
+            # Step 4.7: Post to Facebook + Instagram
             try:
-                # Build complete metadata for Facebook posting
-                facebook_metadata = {
-                    'date': target_date.isoformat()
-                }
-
-                # Add SBS data
-                if sbs_report:
-                    facebook_metadata.update({
-                        'sbs_score': sbs_report['summary']['daily_brilliance_score'],
-                        'sbs_grade': sbs_report['summary']['quality_grade']
-                    })
-
-                # Add weather and visual data
-                if weather_block:
-                    facebook_metadata['weather'] = weather_block
-                if visual_block:
-                    facebook_metadata['visual_analysis'] = visual_block
-
-                # Post to Facebook
-                fb_success = self.facebook_uploader.post_sunset(video_path, facebook_metadata)
+                fb_success = self.facebook_uploader.post_sunset(
+                    video_path, social_metadata, caption_override=shared_caption
+                )
                 if fb_success:
                     self.logger.info("Successfully posted to Facebook")
                 else:
@@ -852,10 +883,11 @@ class SunsetScheduler:
                     f"Error posting sunset to Facebook/Instagram:\n\n{str(e)}"
                 )
 
-            # Step 5: Upload to YouTube with SBS enhancements + weather/visual data
+            # Step 5: Upload to YouTube with same caption as description
             upload_success = self.upload_to_youtube_with_sbs(
                 video_path, target_date, sbs_report,
-                weather_block=weather_block, visual_block=visual_block
+                weather_block=weather_block, visual_block=visual_block,
+                description_override=shared_caption
             )
             if not upload_success:
                 self.logger.warning("YouTube upload failed, but workflow will continue")

@@ -282,44 +282,57 @@ Title:"""
             day_of_week = ''
             season = ''
 
-        # Build prompt
-        prompt = f"""Write a casual, authentic 2-3 sentence Facebook caption for today's sunset timelapse video.
+        # Format date nicely
+        try:
+            from datetime import datetime as dt
+            d = dt.fromisoformat(date_str)
+            date_display = d.strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            date_display = date_str
 
-Date: {date_str} ({day_of_week if day_of_week else 'Unknown day'})
-Season: {season}
+        # Build weather summary line
+        weather_parts = []
+        temp = weather.get('temperature_f')
+        conditions = weather.get('conditions', '')
+        wind = weather.get('wind_speed_mph')
+        humidity = weather.get('humidity_pct')
+        if temp is not None:
+            weather_parts.append(f"{temp}°F")
+        if conditions and conditions not in ('unknown', 'Unknown'):
+            weather_parts.append(conditions)
+        if wind is not None and wind > 3:
+            weather_parts.append(f"wind {wind} mph")
+        weather_line = ', '.join(weather_parts) if weather_parts else 'no weather data'
 
-Weather at sunset:
-- Conditions: {weather.get('conditions', 'Unknown')}
-- Temperature: {weather.get('temperature_f', 'Unknown')}°F
-- Feels like: {weather.get('feels_like_f', 'Unknown')}°F
-- Humidity: {weather.get('humidity_pct', 'Unknown')}%
-- Wind: {weather.get('wind_speed_mph', 'Unknown')} mph
-- Cloud cover: {weather.get('cloud_cover_pct', 'Unknown')}%
+        sunset_type = visual.get('sunset_type', 'unknown')
+        intensity = visual.get('intensity', 'unknown')
 
-Visual analysis:
-- Sunset type: {visual.get('sunset_type', 'Unknown')}
-- Intensity: {visual.get('intensity', 'Unknown')}
-- Quality score (SBS): {sbs_score}/100 (Grade: {sbs_grade})
+        prompt = f"""Write a short caption for a sunset timelapse video. This caption will be used on YouTube, Facebook, and Instagram.
 
-Guidelines:
-- Write like an observer making a simple, honest comment
-- Restrained and understated — NOT effusive, NOT dramatic, NOT over-the-top
-- Write in plain sentences with normal capitalization
-- Do NOT use slang intensifiers: "hit different", "calm as hell", "honestly", "literally", "just different"
-- Do NOT use hype words: "amazing", "incredible", "gorgeous", "stunning", "breathtaking", "epic", "wild"
-- Do NOT use marketing language or superlatives like SPECTACULAR, BRILLIANT
-- Do NOT say "beautiful sunset" or other generic phrases
-- Do NOT try to be clever or poetic — just describe what was visible
-- Reference the day of week or season only if it adds something meaningful
-- NO emojis
-- NO hashtags (we add those separately)
-- 1-2 short sentences maximum
-- If the sunset was muted/overcast, say so plainly — don't try to make it sound dramatic
+Date: {date_display}
+Location: Pelham, Alabama
+Camera: Reolink RLC810-WA, 5-second interval timelapse
+Weather at sunset: {weather_line}
+Sky appearance: {sunset_type}, {intensity} intensity
+
+The caption MUST include:
+1. The date ({date_display})
+2. Location (Pelham, Alabama)
+3. A brief weather/sky observation based on the data above
+
+Rules:
+- 2-3 short sentences
+- Factual and understated — describe what was visible, nothing more
+- Do NOT claim rain, storms, or weather events unless "rainy" or "stormy" appears in both the weather conditions AND the sky appearance confirms it
+- Do NOT use slang, hype words, emojis, or hashtags
+- Do NOT say "beautiful", "stunning", "gorgeous", "amazing", "epic"
+- If the sunset was muted/overcast, say so plainly
+- Include "Camera: Reolink RLC810-WA" at the end
 
 Good examples:
-  "Soft overcast light tonight, the sun just a pale disc behind the clouds."
-  "Cloud cover broke up just before sunset. A few minutes of warm color before the light faded."
-  "Quiet spring evening. Mostly gray, low contrast."
+  "Sunset timelapse from Pelham, Alabama on April 15, 2026. Mostly cloudy skies at 72°F with some warm color breaking through near the horizon. Camera: Reolink RLC810-WA"
+  "April 12, 2026 sunset from Pelham, AL. Clear sky, 68°F, the light faded quickly with little cloud cover to catch the color. Camera: Reolink RLC810-WA"
+  "Overcast evening in Pelham, Alabama on April 18, 2026. Flat gray sky, 74°F, minimal color. Camera: Reolink RLC810-WA"
 
 Caption:"""
 
@@ -582,13 +595,15 @@ Caption:"""
         self.logger.info("Facebook uploader validation passed")
         return True
 
-    def post_sunset(self, video_path: str, metadata: Dict[str, Any]) -> bool:
+    def post_sunset(self, video_path: str, metadata: Dict[str, Any],
+                    caption_override: Optional[str] = None) -> bool:
         """
         Complete Facebook + Instagram posting workflow
 
         Args:
             video_path: Path to sunset video file
             metadata: Complete metadata including weather, visual analysis, SBS score
+            caption_override: Pre-generated caption to use (ensures same caption across all platforms)
 
         Returns:
             True if successful, False otherwise
@@ -606,9 +621,12 @@ Caption:"""
             return True
 
         try:
-            # Generate caption (needed for both platforms)
-            self.logger.info("Generating caption with Anthropic API...")
-            caption = self.generate_caption(metadata)
+            # Use provided caption or generate a new one
+            if caption_override:
+                caption = caption_override
+            else:
+                self.logger.info("Generating caption with Anthropic API...")
+                caption = self.generate_caption(metadata)
             full_caption = self.append_hashtags(caption)
 
             # Post to Facebook if not already done

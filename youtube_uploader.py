@@ -352,7 +352,8 @@ Interval: 5 seconds
                                          start_time: datetime, end_time: datetime,
                                          title_enhancement: str = "", description_enhancement: str = "",
                                          is_test: bool = False,
-                                         title_override: Optional[str] = None) -> Optional[str]:
+                                         title_override: Optional[str] = None,
+                                         description_override: Optional[str] = None) -> Optional[str]:
         """
         Upload video to YouTube with SBS enhancements to title and description
         
@@ -388,7 +389,10 @@ Interval: 5 seconds
             elif title_enhancement:
                 metadata['snippet']['title'] += title_enhancement
 
-            if description_enhancement:
+            # Use shared caption as description if provided, otherwise fall back to template + enhancements
+            if description_override and not is_test:
+                metadata['snippet']['description'] = description_override
+            elif description_enhancement:
                 metadata['snippet']['description'] += description_enhancement
             
             self.logger.info(f"Uploading video to YouTube with SBS enhancements: {metadata['snippet']['title']}")
