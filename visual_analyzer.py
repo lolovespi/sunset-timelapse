@@ -116,13 +116,16 @@ class VisualAnalyzer:
         """Analyze a single frame's sky region."""
         sky = self._extract_sky_region(frame)
         dominant_colors = self._get_dominant_colors(sky, k=3)
-        avg_hsv = self._get_avg_hsv(sky)
+        stats = self._get_sky_stats(sky)
 
         return {
             "position": f"{int(position * 100)}%",
             "dominant_colors": dominant_colors,
-            "avg_saturation": round(float(avg_hsv[1]), 1),
-            "avg_brightness": round(float(avg_hsv[2]), 1),
+            "avg_saturation": round(stats["avg_saturation"], 1),
+            "avg_brightness": round(stats["avg_brightness"], 1),
+            "peak_saturation": round(stats["peak_saturation"], 1),
+            "lit_saturation": round(stats["lit_saturation"], 1),
+            "warm_pixel_ratio": round(stats["warm_pixel_ratio"], 3),
         }
 
     def _extract_sky_region(self, frame: np.ndarray) -> np.ndarray:
@@ -164,10 +167,61 @@ class VisualAnalyzer:
         return hex_colors
 
     @staticmethod
-    def _get_avg_hsv(image: np.ndarray) -> Tuple[float, float, float]:
-        """Return mean H, S, V of the image."""
+    def _get_sky_stats(image: np.ndarray) -> Dict[str, float]:
+        """
+        Compute saturation/brightness stats for the sky region.
+
+        A flat mean over the whole sky misclassifies vibrant sunsets: the
+        bright, saturated horizon band is a small fraction of pixels, so its
+        signal is washed out by the larger area of dim, desaturated upper sky.
+        We return several views so the classifier can pick the right one:
+
+        - avg_saturation / avg_brightness: original flat means (kept for
+          backward-compatible logging and metadata).
+        - peak_saturation: 90th-percentile saturation, robust to a small
+          population of vivid pixels.
+        - lit_saturation: mean saturation restricted to pixels above a
+          brightness floor, so dark/silhouette pixels (whose HSV saturation
+          is meaningless) don't drag the average down.
+        - warm_pixel_ratio: fraction of pixels that are both bright and
+          saturated in the warm hue range (orange/pink/magenta). A non-trivial
+          value is direct evidence of sunset color regardless of the mean.
+        """
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        return tuple(hsv.mean(axis=(0, 1)))
+        h_chan = hsv[:, :, 0]
+        s_chan = hsv[:, :, 1]
+        v_chan = hsv[:, :, 2]
+
+        avg_hsv = hsv.mean(axis=(0, 1))
+
+        # Restrict to pixels with enough luminance that hue/saturation are
+        # meaningful. Very dark pixels (silhouettes, deep upper sky) sit near
+        # black where saturation is undefined or noisy.
+        lit_mask = v_chan >= 60
+        if lit_mask.any():
+            lit_saturation = float(s_chan[lit_mask].mean())
+        else:
+            lit_saturation = float(s_chan.mean())
+
+        # 95th percentile catches a bright horizon band that's only a small
+        # fraction of total sky pixels.
+        peak_saturation = float(np.percentile(s_chan, 95))
+
+        # Warm hues in OpenCV HSV: red wraps around 0/180, orange ~5-25,
+        # pink/magenta ~140-179. Require both saturation and brightness so
+        # dim warm noise doesn't count.
+        warm_hue = ((h_chan <= 25) | (h_chan >= 140))
+        warm_mask = warm_hue & (s_chan >= 80) & (v_chan >= 90)
+        warm_pixel_ratio = float(warm_mask.mean())
+
+        return {
+            "avg_hue": float(avg_hsv[0]),
+            "avg_saturation": float(avg_hsv[1]),
+            "avg_brightness": float(avg_hsv[2]),
+            "peak_saturation": peak_saturation,
+            "lit_saturation": lit_saturation,
+            "warm_pixel_ratio": warm_pixel_ratio,
+        }
 
     # ------------------------------------------------------------------
     # Classification
@@ -176,14 +230,28 @@ class VisualAnalyzer:
     def _classify_sunset(self, frame_analyses: List[Dict]) -> str:
         """
         Classify the sunset type from aggregated frame data.
-        Uses the middle frame (50%) as primary, with others as tiebreakers.
+
+        Selects the most vivid of the sampled frames (the peak of color often
+        falls at 25% or 75%, not the middle) and uses brightness-weighted /
+        percentile saturation so a bright horizon band isn't washed out by
+        the larger area of dim upper sky.
         """
         if not frame_analyses:
             return "muted/overcast"
 
-        # Use the 50% frame if available, else the last one
-        primary = frame_analyses[1] if len(frame_analyses) > 1 else frame_analyses[0]
-        avg_sat = primary["avg_saturation"]
+        # Pick the frame with the strongest evidence of color. Warm pixel
+        # ratio is the most direct signal; peak saturation breaks ties.
+        primary = max(
+            frame_analyses,
+            key=lambda f: (
+                f.get("warm_pixel_ratio", 0.0),
+                f.get("peak_saturation", f["avg_saturation"]),
+            ),
+        )
+
+        peak_sat = primary.get("peak_saturation", primary["avg_saturation"])
+        lit_sat = primary.get("lit_saturation", primary["avg_saturation"])
+        warm_ratio = primary.get("warm_pixel_ratio", 0.0)
         avg_val = primary["avg_brightness"]
 
         # Parse the most-dominant color to get its hue
@@ -194,24 +262,27 @@ class VisualAnalyzer:
         )[0][0]
         hue = int(hsv_pixel[0])
 
-        # Dramatic/stormy: low saturation AND low brightness
-        if avg_sat < 50 and avg_val < 100:
+        # Any one of these is enough. warm_ratio is the strongest signal
+        # because it requires both warm hue AND saturation AND brightness;
+        # even a 2% slice of the sky lit up that way is a real sunset.
+        vivid = peak_sat >= 130 or lit_sat >= 85 or warm_ratio >= 0.02
+
+        # Dramatic/stormy: dim and desaturated everywhere — but only if no
+        # frame shows real color. A dark, washed-out scene with a colorful
+        # horizon is still a sunset, not "stormy".
+        if not vivid and lit_sat < 55 and avg_val < 100:
             return "dramatic/stormy"
 
-        # Muted/overcast: low saturation overall
-        if avg_sat < 60:
+        # Muted/overcast: no frame carries vivid color anywhere.
+        if not vivid:
             return "muted/overcast"
-
-        # Blue hour: blue-ish hues with moderate saturation
-        if 95 <= hue <= 135 and avg_val < 140:
-            return "blue hour"
 
         # Pink/magenta
         if 140 <= hue <= 175:
             return "pink/magenta"
 
-        # Fiery orange: narrow warm hue with high saturation
-        if 5 <= hue <= 20 and avg_sat >= 150:
+        # Fiery orange: narrow warm hue with strong saturation
+        if 5 <= hue <= 20 and peak_sat >= 170:
             return "fiery orange"
 
         # Golden: warm hue with good brightness
@@ -219,27 +290,44 @@ class VisualAnalyzer:
             return "golden"
 
         # Fiery can also appear in 0-5 range (red wrap-around)
-        if hue < 5 and avg_sat >= 120:
+        if hue < 5 and peak_sat >= 150:
             return "fiery orange"
 
-        return "muted/overcast"
+        # Blue hour: blue-ish dominant hue with limited brightness, and only
+        # if there isn't strong warm color elsewhere in the frame.
+        if 95 <= hue <= 135 and avg_val < 140 and warm_ratio < 0.02:
+            return "blue hour"
+
+        # Vivid but hue didn't fit a named bucket — fall back to golden,
+        # which the caption layer treats as a generic warm sunset.
+        return "golden"
 
     def _assess_intensity(self, frame_analyses: List[Dict]) -> str:
         """
         Assess overall intensity from saturation and brightness across frames.
+
+        Uses the most-vivid frame's peak/lit saturation and warm pixel ratio
+        rather than a flat mean, so a brilliant horizon band isn't diluted by
+        the larger area of dim upper sky or by less-vivid samples in the run.
         """
         if not frame_analyses:
             return "low"
 
-        avg_sat = np.mean([f["avg_saturation"] for f in frame_analyses])
-        avg_val = np.mean([f["avg_brightness"] for f in frame_analyses])
+        peak_sat = max(
+            f.get("peak_saturation", f["avg_saturation"]) for f in frame_analyses
+        )
+        lit_sat = max(
+            f.get("lit_saturation", f["avg_saturation"]) for f in frame_analyses
+        )
+        warm_ratio = max(f.get("warm_pixel_ratio", 0.0) for f in frame_analyses)
+        avg_val = float(np.mean([f["avg_brightness"] for f in frame_analyses]))
 
-        # High: vivid colors + good brightness
-        if avg_sat >= 100 and avg_val >= 120:
+        # High: clearly vivid color across a non-trivial area, with usable light.
+        if (peak_sat >= 170 or warm_ratio >= 0.08) and avg_val >= 80:
             return "high"
 
-        # Medium: moderate color presence
-        if avg_sat >= 55 or avg_val >= 130:
+        # Medium: visible color somewhere in the sky.
+        if peak_sat >= 120 or lit_sat >= 75 or warm_ratio >= 0.02:
             return "medium"
 
         return "low"
