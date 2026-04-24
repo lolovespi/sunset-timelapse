@@ -370,55 +370,60 @@ Caption:"""
             self.logger.error(f"Video file not found: {video_path}")
             return None
 
-        try:
-            self.logger.info(f"Uploading video to Facebook: {video_path}")
+        import time
+        url = f"{self.GRAPH_VIDEO_URL}/{self.page_id}/videos"
+        last_error = None
 
-            # Facebook video upload endpoint
-            url = f"{self.GRAPH_VIDEO_URL}/{self.page_id}/videos"
+        # Retry up to 3 times for transient Meta errors (code 1 / subcode 99)
+        for attempt in range(3):
+            if attempt > 0:
+                wait = 30 * attempt
+                self.logger.info(f"Facebook upload retry {attempt}/3 after {wait}s wait...")
+                time.sleep(wait)
 
-            # Prepare the video file
-            with open(video_path, 'rb') as video_file:
-                files = {
-                    'source': video_file
-                }
-                data = {
-                    'description': caption,
-                    'access_token': self.page_access_token
-                }
+            try:
+                self.logger.info(f"Uploading video to Facebook: {video_path}")
+                with open(video_path, 'rb') as video_file:
+                    response = requests.post(
+                        url,
+                        files={'source': video_file},
+                        data={'description': caption, 'access_token': self.page_access_token},
+                        timeout=300,
+                    )
 
-                # Upload video
-                response = requests.post(url, files=files, data=data, timeout=300)
-
-            # Check response
-            if response.status_code == 200:
-                result = response.json()
-                facebook_id = result.get('id')
-
-                if facebook_id:
-                    self.logger.info(f"Successfully posted to Facebook. Post ID: {facebook_id}")
-                    self.update_tracking_db(date_str, 'posted', facebook_id)
-                    return facebook_id
-                else:
+                if response.status_code == 200:
+                    result = response.json()
+                    facebook_id = result.get('id')
+                    if facebook_id:
+                        self.logger.info(f"Successfully posted to Facebook. Post ID: {facebook_id}")
+                        self.update_tracking_db(date_str, 'posted', facebook_id)
+                        return facebook_id
                     self.logger.error(f"Facebook response missing 'id': {result}")
                     return None
-            else:
-                self.logger.error(f"Facebook upload failed. Status: {response.status_code}")
-                self.logger.error(f"Response: {response.text}")
 
-                # Send email notification
-                self.email_notifier.send_notification(
-                    f"Facebook Upload Failed - {date_str}",
-                    f"Failed to upload sunset timelapse to Facebook.\n\nStatus: {response.status_code}\n\nResponse:\n{response.text}"
-                )
-                return None
+                last_error = f"status {response.status_code}: {response.text}"
+                # Check for transient Meta errors
+                try:
+                    err = response.json().get('error', {})
+                    is_transient = err.get('error_subcode') == 99 or err.get('code') == 1
+                except (ValueError, AttributeError):
+                    is_transient = False
 
-        except Exception as e:
-            self.logger.error(f"Exception during Facebook upload: {e}")
-            self.email_notifier.send_notification(
-                f"Facebook Upload Error - {date_str}",
-                f"Exception occurred during Facebook upload:\n\n{str(e)}"
-            )
-            return None
+                self.logger.warning(f"Facebook upload attempt {attempt + 1} failed: {last_error}")
+                if not is_transient:
+                    break
+
+            except Exception as e:
+                last_error = str(e)
+                self.logger.warning(f"Facebook upload attempt {attempt + 1} exception: {e}")
+
+        # All retries exhausted
+        self.logger.error(f"Facebook upload failed after retries: {last_error}")
+        self.email_notifier.send_notification(
+            f"Facebook Upload Failed - {date_str}",
+            f"Failed to upload sunset timelapse to Facebook after 3 retries.\n\n{last_error}"
+        )
+        return None
 
     def post_to_instagram(self, video_path: str, caption: str) -> Optional[str]:
         """
