@@ -26,7 +26,9 @@ class VisualAnalyzer:
         "dramatic/stormy":  {"hue_range": (0, 180),  "sat_max": 50,  "val_max": 100},
     }
 
-    SAMPLE_POSITIONS = (0.25, 0.50, 0.75)
+    # Sample more positions to better catch peak sunset color (which can
+    # land anywhere in the capture window, not always the middle).
+    SAMPLE_POSITIONS = (0.35, 0.45, 0.55, 0.65, 0.75, 0.85)
 
     def __init__(self):
         self.config = get_config()
@@ -176,13 +178,14 @@ class VisualAnalyzer:
     def _classify_sunset(self, frame_analyses: List[Dict]) -> str:
         """
         Classify the sunset type from aggregated frame data.
-        Uses the middle frame (50%) as primary, with others as tiebreakers.
+        Uses the most saturated (most colorful) frame as primary, since
+        peak sunset color can occur anywhere in the capture window.
         """
         if not frame_analyses:
             return "muted/overcast"
 
-        # Use the 50% frame if available, else the last one
-        primary = frame_analyses[1] if len(frame_analyses) > 1 else frame_analyses[0]
+        # Pick the most saturated frame — that's where the real color is
+        primary = max(frame_analyses, key=lambda f: f["avg_saturation"])
         avg_sat = primary["avg_saturation"]
         avg_val = primary["avg_brightness"]
 
@@ -226,20 +229,22 @@ class VisualAnalyzer:
 
     def _assess_intensity(self, frame_analyses: List[Dict]) -> str:
         """
-        Assess overall intensity from saturation and brightness across frames.
+        Assess overall intensity from saturation and brightness.
+        Uses peak saturation rather than mean — a sustained vibrant
+        moment matters more than the average across pre/post-sunset.
         """
         if not frame_analyses:
             return "low"
 
-        avg_sat = np.mean([f["avg_saturation"] for f in frame_analyses])
-        avg_val = np.mean([f["avg_brightness"] for f in frame_analyses])
+        peak_sat = max(f["avg_saturation"] for f in frame_analyses)
+        peak_val = max(f["avg_brightness"] for f in frame_analyses)
 
-        # High: vivid colors + good brightness
-        if avg_sat >= 100 and avg_val >= 120:
+        # High: vivid colors + good brightness at peak
+        if peak_sat >= 90 and peak_val >= 120:
             return "high"
 
         # Medium: moderate color presence
-        if avg_sat >= 55 or avg_val >= 130:
+        if peak_sat >= 55 or peak_val >= 130:
             return "medium"
 
         return "low"

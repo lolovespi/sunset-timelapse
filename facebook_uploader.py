@@ -299,12 +299,35 @@ Title:"""
         sunset_type = visual.get('sunset_type', 'unknown')
         intensity = visual.get('intensity', 'unknown')
 
+        # SBS score is the most reliable signal of how good the sunset actually was
+        sbs_grade_hint = ""
+        if sbs_score is not None:
+            try:
+                s = float(sbs_score)
+                if s >= 80:
+                    sbs_grade_hint = "Quality: excellent — vivid color, strong contrast"
+                elif s >= 70:
+                    sbs_grade_hint = "Quality: good — solid color and contrast"
+                elif s >= 60:
+                    sbs_grade_hint = "Quality: decent — some color present, not a washout"
+                elif s >= 50:
+                    sbs_grade_hint = "Quality: ordinary — limited color"
+                else:
+                    sbs_grade_hint = "Quality: flat/gray — minimal color"
+            except (ValueError, TypeError):
+                pass
+
         prompt = f"""Write a short social media caption for a daily sunset timelapse video from Pelham, Alabama.
 
 Data for this sunset:
 - Date: {date_display}
 - Weather: {weather_line}
-- Sky: {sunset_type}, {intensity} intensity
+- Visual analysis (rough): {sunset_type}, {intensity} intensity
+- {sbs_grade_hint or "Quality: unknown"}
+
+IMPORTANT: The "Quality" line above is the MOST reliable signal — trust it over the
+visual analysis. The visual analysis can mislabel a vibrant sunset as "muted" if it
+samples the wrong moment. If quality is "decent" or above, the sunset had real color.
 
 VOICE:
 - Direct, dry, observational. No performative enthusiasm.
@@ -314,21 +337,23 @@ VOICE:
 
 RULES:
 - 1-3 sentences max
-- Describe what actually happened: sky conditions, light, temperature if notable
+- Describe what actually happened, calibrated to the Quality signal
 - Include the date and "Pelham, AL" naturally in the text
 - End with "Camera: Reolink RLC810-WA" on its own line
 - Vary the structure. Don't start with "Sunset timelapse from..."
 - Do NOT claim weather events (rain, storms) unless the data explicitly confirms it
 - No emojis, no hashtags
-- Do NOT use: "hit different", "still worth watching", "in their own way", "nothing dramatic"
-- Do NOT use "muted" in every caption — use alternatives like flat, subdued, low-contrast, gray, washed out, quiet
+- Do NOT use: "hit different", "still worth watching", "in their own way", "nothing dramatic", "low-contrast", "without incident"
+- Avoid "muted" if you used it recently — alternatives: flat, subdued, gray, washed out, quiet, soft
+- Do NOT call a "decent" or better sunset flat/gray/washed out
 - Do NOT oversell an ordinary sunset
 
-Good examples:
-  "Clouds sat low over Pelham, AL tonight. {date_display}. Flat light, no color to speak of. Camera: Reolink RLC810-WA"
-  "{date_display} — partly cloudy, {temp}°F. Some orange near the horizon but it didn't last. Pelham, AL. Camera: Reolink RLC810-WA"
-  "Clear sky in Pelham tonight, {date_display}. Sun dropped fast with nothing to catch the light. Camera: Reolink RLC810-WA"
-  "Good color tonight. Clouds broke up right at sunset and the whole horizon lit up. {date_display}, Pelham, AL. Camera: Reolink RLC810-WA"
+Examples (matched to quality):
+  Excellent: "Real color tonight. Clouds broke up right at sunset and the whole horizon lit up. {date_display}, Pelham, AL. Camera: Reolink RLC810-WA"
+  Good: "{date_display} — partly cloudy, {temp}°F. Decent orange and pink across the western sky for about ten minutes. Pelham, AL. Camera: Reolink RLC810-WA"
+  Decent: "Some color tonight, mostly soft pink along the horizon. {date_display}, Pelham, AL, {temp}°F. Camera: Reolink RLC810-WA"
+  Ordinary: "Clear sky in Pelham tonight, {date_display}. Sun dropped fast with little to catch the light. Camera: Reolink RLC810-WA"
+  Flat: "Clouds sat low over Pelham, AL tonight. {date_display}. Flat light, no color to speak of. Camera: Reolink RLC810-WA"
 
 Caption:"""
 
