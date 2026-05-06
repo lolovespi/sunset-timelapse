@@ -339,6 +339,9 @@ class SunsetScheduler:
                     title_metadata['weather'] = weather_block
                 if visual_block:
                     title_metadata['visual_analysis'] = visual_block
+                if sbs_report:
+                    title_metadata['sbs_score'] = sbs_report['summary']['daily_brilliance_score']
+                    title_metadata['sbs_grade'] = sbs_report['summary']['quality_grade']
                 ai_title = self.facebook_uploader.generate_youtube_title(title_metadata)
             except Exception as e:
                 self.logger.warning(f"AI title generation failed: {e}")

@@ -135,26 +135,35 @@ class FacebookUploader:
 
     def _build_fallback_caption(self, metadata: Dict[str, Any]) -> str:
         """Build a caption from metadata when AI generation is unavailable"""
-        date_str = metadata.get('capture_date', '')
+        date_str = metadata.get('capture_date', metadata.get('date', ''))
         try:
             from datetime import datetime as dt
-            d = dt.strptime(date_str, '%Y-%m-%d')
-            date_display = d.strftime('%B %d, %Y')
+            d = dt.fromisoformat(date_str) if date_str else None
+            date_display = d.strftime('%B %d, %Y') if d else 'today'
         except (ValueError, TypeError):
             date_display = date_str or 'today'
 
-        weather = metadata.get('weather')
+        weather = metadata.get('weather', {})
         parts = []
-        if weather:
-            if weather.get('conditions'):
-                parts.append(weather['conditions'])
-            if weather.get('temperature_f') is not None:
-                parts.append(f"{weather['temperature_f']}°F")
+        if weather.get('conditions') and weather['conditions'] not in ('unknown', 'Unknown'):
+            parts.append(weather['conditions'])
+        if weather.get('temperature_f') is not None:
+            parts.append(f"{weather['temperature_f']}°F")
+        if weather.get('humidity_pct') is not None:
+            parts.append(f"{weather['humidity_pct']}% humidity")
+        if weather.get('wind_speed_mph') is not None and weather['wind_speed_mph'] > 3:
+            parts.append(f"wind {weather['wind_speed_mph']} mph")
 
-        if parts:
-            caption = f"{date_display}, Pelham, AL. {', '.join(parts)}. Camera: Reolink RLC810-WA"
-        else:
-            caption = f"{date_display}, Pelham, AL. Camera: Reolink RLC810-WA"
+        sbs_score = metadata.get('sbs_score')
+        sbs_part = ""
+        if sbs_score is not None:
+            try:
+                sbs_part = f" SBS: {float(sbs_score):.0f}."
+            except (ValueError, TypeError):
+                pass
+
+        weather_str = f" {', '.join(parts)}." if parts else ""
+        caption = f"{date_display}, Pelham, AL.{weather_str}{sbs_part} Camera: Reolink RLC810-WA"
 
         return caption
 
@@ -216,15 +225,41 @@ class FacebookUploader:
 
         weather = metadata.get('weather') or {}
         visual = metadata.get('visual_analysis') or {}
+        sbs_score = metadata.get('sbs_score')
+
+        # Build sky summary from SBS (reliable) + weather + dominant colors
+        sky_parts = []
+        if weather.get('conditions') and weather['conditions'] not in ('unknown', 'Unknown'):
+            sky_parts.append(weather['conditions'])
+        if sbs_score is not None:
+            try:
+                s = float(sbs_score)
+                if s >= 80:
+                    sky_parts.append("vivid color")
+                elif s >= 70:
+                    sky_parts.append("good color")
+                elif s >= 60:
+                    sky_parts.append("some color")
+                elif s >= 50:
+                    sky_parts.append("limited color")
+                else:
+                    sky_parts.append("flat/gray")
+            except (ValueError, TypeError):
+                pass
+        # Add dominant colors from visual analysis if available
+        dominant_hex = self._get_dominant_colors_from_visual(visual)
+        if dominant_hex:
+            sky_parts.append(f"dominant colors: {', '.join(dominant_hex)}")
+        sky_line = '; '.join(sky_parts) if sky_parts else 'no data'
 
         prompt = f"""Write a YouTube title for a sunset timelapse video.
 
 Data:
 - Date: {date_display}
-- Sky: {weather.get('conditions', 'unknown')}, {visual.get('sunset_type', 'unknown')}, {visual.get('intensity', 'unknown')} intensity
+- Sky: {sky_line}
 
 Format: "Sunset {date_display} - " followed by 2-5 words about the sky.
-Direct and plain. No hype. Vary the phrasing — don't reuse "muted" every day.
+Direct and plain. No hype. Vary the phrasing.
 
 Examples:
   "Sunset {date_display} - Flat Gray, No Color"
@@ -264,16 +299,6 @@ Title:"""
         sbs_score = metadata.get('sbs_score')
         sbs_grade = metadata.get('sbs_grade')
 
-        # Convert date to day of week
-        try:
-            from datetime import datetime
-            date_obj = datetime.fromisoformat(date_str)
-            day_of_week = date_obj.strftime('%A')
-            season = self._get_season(date_obj.month)
-        except:
-            day_of_week = ''
-            season = ''
-
         # Format date nicely
         try:
             from datetime import datetime as dt
@@ -282,52 +307,50 @@ Title:"""
         except (ValueError, TypeError):
             date_display = date_str
 
-        # Build weather summary line
+        # Build weather line with all Tempest data
         weather_parts = []
         temp = weather.get('temperature_f')
         conditions = weather.get('conditions', '')
         wind = weather.get('wind_speed_mph')
         humidity = weather.get('humidity_pct')
+        cloud_cover = weather.get('cloud_cover_pct')
         if temp is not None:
             weather_parts.append(f"{temp}°F")
         if conditions and conditions not in ('unknown', 'Unknown'):
             weather_parts.append(conditions)
+        if humidity is not None:
+            weather_parts.append(f"{humidity}% humidity")
         if wind is not None and wind > 3:
             weather_parts.append(f"wind {wind} mph")
+        if cloud_cover is not None:
+            weather_parts.append(f"{cloud_cover}% cloud cover")
         weather_line = ', '.join(weather_parts) if weather_parts else 'no weather data'
 
-        sunset_type = visual.get('sunset_type', 'unknown')
-        intensity = visual.get('intensity', 'unknown')
-
-        # SBS score is the most reliable signal of how good the sunset actually was
-        sbs_grade_hint = ""
+        # SBS score and grade — the primary quality signal
+        sbs_line = "Sunset Brilliance Score: unknown"
         if sbs_score is not None:
             try:
                 s = float(sbs_score)
-                if s >= 80:
-                    sbs_grade_hint = "Quality: excellent — vivid color, strong contrast"
-                elif s >= 70:
-                    sbs_grade_hint = "Quality: good — solid color and contrast"
-                elif s >= 60:
-                    sbs_grade_hint = "Quality: decent — some color present, not a washout"
-                elif s >= 50:
-                    sbs_grade_hint = "Quality: ordinary — limited color"
-                else:
-                    sbs_grade_hint = "Quality: flat/gray — minimal color"
+                grade = sbs_grade or self._sbs_score_to_grade(s)
+                sbs_line = f"Sunset Brilliance Score: {s:.1f}/100 (grade: {grade})"
             except (ValueError, TypeError):
                 pass
+
+        # Dominant colors from visual analysis (objective, useful)
+        dominant_hex = self._get_dominant_colors_from_visual(visual)
+        colors_line = f"Dominant sky colors: {', '.join(dominant_hex)}" if dominant_hex else ""
 
         prompt = f"""Write a short social media caption for a daily sunset timelapse video from Pelham, Alabama.
 
 Data for this sunset:
 - Date: {date_display}
-- Weather: {weather_line}
-- Visual analysis (rough): {sunset_type}, {intensity} intensity
-- {sbs_grade_hint or "Quality: unknown"}
+- Weather at sunset: {weather_line}
+- {sbs_line}
+{f'- {colors_line}' if colors_line else ''}
 
-IMPORTANT: The "Quality" line above is the MOST reliable signal — trust it over the
-visual analysis. The visual analysis can mislabel a vibrant sunset as "muted" if it
-samples the wrong moment. If quality is "decent" or above, the sunset had real color.
+The Sunset Brilliance Score (SBS) is a 0-100 measure of how colorful/dramatic
+the sunset was. Use it to calibrate your tone: 80+ is exceptional, 70+ is good,
+60+ is decent, 50+ is ordinary, below 50 is flat. Include the score in the caption.
 
 VOICE:
 - Direct, dry, observational. No performative enthusiasm.
@@ -337,27 +360,39 @@ VOICE:
 
 RULES:
 - 1-3 sentences max
-- Describe what actually happened, calibrated to the Quality signal
 - Include the date and "Pelham, AL" naturally in the text
+- Include the weather conditions and temperature
+- Include the SBS score naturally (e.g., "SBS: 72" or "Brilliance score: 72")
 - End with "Camera: Reolink RLC810-WA" on its own line
 - Vary the structure. Don't start with "Sunset timelapse from..."
 - Do NOT claim weather events (rain, storms) unless the data explicitly confirms it
 - No emojis, no hashtags
 - Do NOT use: "hit different", "still worth watching", "in their own way", "nothing dramatic", "low-contrast", "without incident"
-- Avoid "muted" if you used it recently — alternatives: flat, subdued, gray, washed out, quiet, soft
-- Do NOT call a "decent" or better sunset flat/gray/washed out
-- Do NOT oversell an ordinary sunset
+- Do NOT call a 60+ SBS sunset flat/gray/washed out
+- Do NOT oversell a sub-50 SBS sunset
 
-Examples (matched to quality):
-  Excellent: "Real color tonight. Clouds broke up right at sunset and the whole horizon lit up. {date_display}, Pelham, AL. Camera: Reolink RLC810-WA"
-  Good: "{date_display} — partly cloudy, {temp}°F. Decent orange and pink across the western sky for about ten minutes. Pelham, AL. Camera: Reolink RLC810-WA"
-  Decent: "Some color tonight, mostly soft pink along the horizon. {date_display}, Pelham, AL, {temp}°F. Camera: Reolink RLC810-WA"
-  Ordinary: "Clear sky in Pelham tonight, {date_display}. Sun dropped fast with little to catch the light. Camera: Reolink RLC810-WA"
-  Flat: "Clouds sat low over Pelham, AL tonight. {date_display}. Flat light, no color to speak of. Camera: Reolink RLC810-WA"
+Examples:
+  "{date_display}, Pelham, AL. Partly cloudy, 74°F. Clouds caught real color tonight — orange bled into pink for a good ten minutes. SBS: 78. Camera: Reolink RLC810-WA"
+  "Clear sky, 68°F. Sun dropped fast with nothing to catch the light. {date_display}, Pelham, AL. Brilliance score: 41. Camera: Reolink RLC810-WA"
+  "Overcast broke just enough to let some warm light through. {date_display}, Pelham, AL, 71°F. SBS: 63. Camera: Reolink RLC810-WA"
+  "Thick clouds over Pelham tonight. {date_display}, 65°F. Flat light, no color. SBS: 32. Camera: Reolink RLC810-WA"
 
 Caption:"""
 
         return prompt
+
+    @staticmethod
+    def _sbs_score_to_grade(score: float) -> str:
+        """Convert numeric SBS score to letter grade."""
+        if score >= 80:
+            return "A"
+        elif score >= 70:
+            return "B"
+        elif score >= 60:
+            return "C"
+        elif score >= 50:
+            return "D"
+        return "F"
 
     def _get_season(self, month: int) -> str:
         """Get season from month"""
@@ -370,6 +405,21 @@ Caption:"""
         elif month in [9, 10, 11]:
             return "Fall"
         return ""
+
+    @staticmethod
+    def _get_dominant_colors_from_visual(visual: Dict) -> list:
+        """Extract dominant hex colors from visual analysis frames."""
+        if not visual or 'frames' not in visual:
+            return []
+        # Collect the top dominant color from each frame, deduplicate
+        colors = []
+        seen = set()
+        for frame in visual.get('frames', []):
+            for c in frame.get('dominant_colors', [])[:1]:
+                if c not in seen:
+                    colors.append(c)
+                    seen.add(c)
+        return colors[:3]
 
     def append_hashtags(self, caption: str) -> str:
         """Append hashtags to caption"""
