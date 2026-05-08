@@ -667,7 +667,9 @@ class SunsetScheduler:
                     if visual_block:
                         social_metadata['visual_analysis'] = visual_block
 
-                    shared_caption = self.facebook_uploader.generate_caption(social_metadata)
+                    shared_caption = self.facebook_uploader.generate_caption(
+                        social_metadata, video_path=str(video_path)
+                    )
                     self.logger.info(f"Recovery: Shared caption: {shared_caption}")
 
                     fb_success = self.facebook_uploader.post_sunset(
@@ -863,7 +865,9 @@ class SunsetScheduler:
             if visual_block:
                 social_metadata['visual_analysis'] = visual_block
 
-            shared_caption = self.facebook_uploader.generate_caption(social_metadata)
+            shared_caption = self.facebook_uploader.generate_caption(
+                social_metadata, video_path=str(video_path)
+            )
             self.logger.info(f"Shared caption: {shared_caption}")
 
             # Step 4.7: Post to Facebook + Instagram

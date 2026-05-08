@@ -167,40 +167,181 @@ class FacebookUploader:
 
         return caption
 
-    def generate_caption(self, metadata: Dict[str, Any]) -> str:
+    def generate_caption(self, metadata: Dict[str, Any],
+                         video_path: Optional[str] = None) -> str:
         """
-        Generate a casual Facebook caption using Anthropic API
+        Generate a caption using Anthropic API with optional vision.
+
+        When a video_path is provided, extracts key frames and sends them
+        to Haiku vision so the AI describes what it actually sees.  Falls
+        back to text-only if frame extraction or vision call fails.
 
         Args:
-            metadata: Dictionary containing weather data, visual analysis, SBS score, etc.
+            metadata: Dictionary containing weather data, SBS score, etc.
+            video_path: Optional path to the timelapse video for vision analysis.
 
         Returns:
-            Generated caption (2-3 sentences, casual tone)
+            Generated caption (2-3 sentences)
         """
         if not self.anthropic_client:
             self.logger.error("Anthropic client not initialized. Cannot generate caption.")
             return self._build_fallback_caption(metadata)
 
-        try:
-            # Build context for the AI
-            prompt = self._build_caption_prompt(metadata)
+        # Try vision-based caption first when we have a video
+        if video_path:
+            try:
+                caption = self._generate_vision_caption(metadata, video_path)
+                if caption:
+                    return caption
+            except Exception as e:
+                self.logger.warning(f"Vision caption failed, falling back to text-only: {e}")
 
-            # Call Anthropic API
+        # Text-only fallback
+        try:
+            prompt = self._build_caption_prompt(metadata)
             message = self.anthropic_client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=150,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
+                messages=[{"role": "user", "content": prompt}]
             )
-
             caption = message.content[0].text.strip()
-            self.logger.info(f"Generated caption: {caption}")
+            self.logger.info(f"Generated caption (text-only): {caption}")
             return caption
 
         except Exception as e:
             self.logger.error(f"Failed to generate caption with Anthropic API: {e}")
             return self._build_fallback_caption(metadata)
+
+    def _extract_caption_frames(self, video_path: str,
+                                 positions: tuple = (0.25, 0.50, 0.65, 0.80, 0.90, 0.97)
+                                 ) -> list:
+        """Extract frames at key positions from the video for vision analysis.
+
+        Weighted toward the end of the capture where peak sunset color
+        typically occurs.
+
+        Returns:
+            List of base64-encoded JPEG strings.
+        """
+        import base64
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            self.logger.warning(f"Cannot open video for frame extraction: {video_path}")
+            return []
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < 10:
+            cap.release()
+            return []
+
+        frames_b64 = []
+        for pos in positions:
+            frame_idx = int(total_frames * pos)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            # Resize to keep token cost low (640px wide)
+            h, w = frame.shape[:2]
+            if w > 640:
+                scale = 640 / w
+                frame = cv2.resize(frame, (640, int(h * scale)))
+            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            frames_b64.append(base64.b64encode(buf).decode('utf-8'))
+
+        cap.release()
+        self.logger.info(f"Extracted {len(frames_b64)} frames for vision caption")
+        return frames_b64
+
+    def _generate_vision_caption(self, metadata: Dict[str, Any],
+                                  video_path: str) -> Optional[str]:
+        """Generate a caption by showing actual sunset frames to Haiku vision."""
+        frames_b64 = self._extract_caption_frames(video_path)
+        if not frames_b64:
+            return None
+
+        # Build the text portion of the prompt
+        date_str = metadata.get('date', 'today')
+        weather = metadata.get('weather', {})
+        sbs_score = metadata.get('sbs_score')
+        sbs_grade = metadata.get('sbs_grade')
+
+        try:
+            from datetime import datetime as dt
+            d = dt.fromisoformat(date_str)
+            date_display = d.strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            date_display = date_str
+
+        weather_parts = []
+        if weather.get('temperature_f') is not None:
+            weather_parts.append(f"{weather['temperature_f']}°F")
+        if weather.get('conditions') and weather['conditions'] not in ('unknown', 'Unknown'):
+            weather_parts.append(weather['conditions'])
+        if weather.get('humidity_pct') is not None:
+            weather_parts.append(f"{weather['humidity_pct']}% humidity")
+        if weather.get('wind_speed_mph') is not None and weather['wind_speed_mph'] > 3:
+            weather_parts.append(f"wind {weather['wind_speed_mph']} mph")
+        weather_line = ', '.join(weather_parts) if weather_parts else 'no weather data'
+
+        sbs_line = ""
+        if sbs_score is not None:
+            try:
+                s = float(sbs_score)
+                grade = sbs_grade or self._sbs_score_to_grade(s)
+                sbs_line = f"Sunset Brilliance Score: {s:.1f}/100 (grade: {grade})"
+            except (ValueError, TypeError):
+                pass
+
+        text_prompt = f"""These are frames from today's sunset timelapse in Pelham, Alabama, ordered early-to-late. Write a short social media caption describing what you see.
+
+Data:
+- Date: {date_display}
+- Weather at sunset: {weather_line}
+{f'- {sbs_line}' if sbs_line else ''}
+
+VOICE:
+- Direct, dry, observational. No performative enthusiasm.
+- Short sentences. No filler.
+- Describe what you actually see in the frames — the colors, the clouds, how the light changed.
+- Sound like a real person who watches sunsets every day.
+
+RULES:
+- 1-3 sentences max
+- Include the date and "Pelham, AL" naturally
+- Include the weather conditions and temperature
+- Include the SBS score naturally (e.g., "SBS: 72")
+- End with "Camera: Reolink RLC810-WA" on its own line
+- Do NOT start with "Sunset timelapse from..."
+- No emojis, no hashtags
+- Do NOT use: "hit different", "still worth watching", "in their own way"
+
+Caption:"""
+
+        # Build multimodal content: frames + text
+        content = []
+        for i, b64 in enumerate(frames_b64):
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": b64,
+                },
+            })
+        content.append({"type": "text", "text": text_prompt})
+
+        message = self.anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": content}]
+        )
+
+        caption = message.content[0].text.strip()
+        self.logger.info(f"Generated caption (vision): {caption}")
+        return caption
 
     def generate_youtube_title(self, metadata: Dict[str, Any]) -> str:
         """
@@ -702,7 +843,7 @@ Caption:"""
                 caption = caption_override
             else:
                 self.logger.info("Generating caption with Anthropic API...")
-                caption = self.generate_caption(metadata)
+                caption = self.generate_caption(metadata, video_path=video_path)
             full_caption = self.append_hashtags(caption)
 
             # Post to Facebook if not already done
