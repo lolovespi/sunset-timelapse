@@ -213,7 +213,7 @@ class FacebookUploader:
             return self._build_fallback_caption(metadata)
 
     def _extract_caption_frames(self, video_path: str,
-                                 positions: tuple = (0.25, 0.50, 0.65, 0.80, 0.90, 0.97)
+                                 positions: tuple = (0.25, 0.60, 0.85, 0.97)
                                  ) -> list:
         """Extract frames at key positions from the video for vision analysis.
 
