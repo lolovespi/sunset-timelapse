@@ -350,11 +350,7 @@ Caption:"""
         return caption
 
     def generate_youtube_title(self, metadata: Dict[str, Any]) -> str:
-        """
-        Generate a short AI title for YouTube (max ~70 chars).
-
-        Always includes the date. Falls back to "Sunset MM/DD/YY" if AI fails.
-        """
+        """Generate a standard YouTube title: 'Sunset MM/DD/YY'."""
         try:
             from datetime import datetime as dt
             date_str = metadata.get('date') or metadata.get('capture_date', '')
@@ -362,80 +358,9 @@ Caption:"""
             date_display = d.strftime('%m/%d/%y')
         except (ValueError, TypeError):
             from datetime import datetime as dt
-            d = dt.now()
-            date_display = d.strftime('%m/%d/%y')
+            date_display = dt.now().strftime('%m/%d/%y')
 
-        fallback = f"Sunset {date_display}"
-
-        if not self.anthropic_client:
-            return fallback
-
-        weather = metadata.get('weather') or {}
-        visual = metadata.get('visual_analysis') or {}
-        sbs_score = metadata.get('sbs_score')
-
-        # Build sky summary from SBS (reliable) + weather + dominant colors
-        sky_parts = []
-        if weather.get('conditions') and weather['conditions'] not in ('unknown', 'Unknown'):
-            sky_parts.append(weather['conditions'])
-        if sbs_score is not None:
-            try:
-                s = float(sbs_score)
-                if s >= 80:
-                    sky_parts.append("vivid color")
-                elif s >= 70:
-                    sky_parts.append("good color")
-                elif s >= 60:
-                    sky_parts.append("some color")
-                elif s >= 50:
-                    sky_parts.append("limited color")
-                else:
-                    sky_parts.append("flat/gray")
-            except (ValueError, TypeError):
-                pass
-        # Add dominant colors from visual analysis if available
-        dominant_hex = self._get_dominant_colors_from_visual(visual)
-        if dominant_hex:
-            sky_parts.append(f"dominant colors: {', '.join(dominant_hex)}")
-        sky_line = '; '.join(sky_parts) if sky_parts else 'no data'
-
-        prompt = f"""Write a YouTube title for a sunset timelapse video.
-
-Data:
-- Date: {date_display}
-- Sky: {sky_line}
-
-Format: "Sunset {date_display} - " followed by 2-5 words about the sky.
-Direct and plain. No hype. Vary the phrasing.
-
-Examples:
-  "Sunset {date_display} - Flat Gray, No Color"
-  "Sunset {date_display} - Clouds Broke at the Horizon"
-  "Sunset {date_display} - Clear Sky, Quick Fade"
-  "Sunset {date_display} - Low Overcast"
-  "Sunset {date_display} - Good Color Tonight"
-
-Return only the title.
-
-Title:"""
-
-        try:
-            message = self.anthropic_client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=50,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            title = message.content[0].text.strip().strip('"').strip()
-            # Enforce prefix and length
-            if not title.startswith(f"Sunset {date_display}"):
-                title = fallback
-            if len(title) > 100:
-                title = title[:97] + "..."
-            self.logger.info(f"Generated YouTube title: {title}")
-            return title
-        except Exception as e:
-            self.logger.warning(f"YouTube title generation failed: {e}")
-            return fallback
+        return f"Sunset {date_display}"
 
     def _build_caption_prompt(self, metadata: Dict[str, Any]) -> str:
         """Build the prompt for Anthropic API"""
