@@ -213,12 +213,16 @@ class FacebookUploader:
             return self._build_fallback_caption(metadata)
 
     def _extract_caption_frames(self, video_path: str,
-                                 positions: tuple = (0.25, 0.60, 0.85, 0.97)
+                                 positions: tuple = (0.30, 0.50, 0.62, 0.75, 0.90)
                                  ) -> list:
         """Extract frames at key positions from the video for vision analysis.
 
-        Weighted toward the end of the capture where peak sunset color
-        typically occurs.
+        Default positions for a 2-hour capture (60 min before/after sunset):
+          0.30 → 24 min before sunset (still bright)
+          0.50 → at sunset
+          0.62 → 14 min after (early color)
+          0.75 → 30 min after (peak color window)
+          0.90 → 48 min after (fading/blue hour)
 
         Returns:
             List of base64-encoded JPEG strings.
@@ -295,28 +299,30 @@ class FacebookUploader:
             except (ValueError, TypeError):
                 pass
 
-        text_prompt = f"""These are frames from today's sunset timelapse in Pelham, Alabama, ordered early-to-late. Write a short social media caption describing what you see.
+        text_prompt = f"""You are writing a short caption for a sunset timelapse video from Mont Vaughn Purvis (MVP), a home in Pelham, Alabama (Birmingham area). The images show the sky at five moments across the evening — before sunset, at sunset, and three points across the hour after as the color builds and fades.
 
 Data:
 - Date: {date_display}
 - Weather at sunset: {weather_line}
 {f'- {sbs_line}' if sbs_line else ''}
 
-VOICE:
-- Direct, dry, observational. No performative enthusiasm.
-- Short sentences. No filler.
-- Describe what you actually see in the frames — the colors, the clouds, how the light changed.
-- Sound like a real person who watches sunsets every day.
+VOICE — write like someone who actually lives here and pays attention, not like a lifestyle brand:
+- Warm but never precious. Grounded in place. Quietly proud without being showy.
+- Observations over descriptions. Notice light, weather, stillness, or change — say it plainly.
+- Appalachian roots inform the voice: understated relationship with land and home.
+- Dry humor is welcome. Sentiment is earned, not sprinkled.
 
 RULES:
 - 1-3 sentences max
 - Include the date and "Pelham, AL" naturally
-- Include the weather conditions and temperature
+- Include the weather (temperature, conditions) naturally
 - Include the SBS score naturally (e.g., "SBS: 72")
 - End with "Camera: Reolink RLC810-WA" on its own line
-- Do NOT start with "Sunset timelapse from..."
+- Do NOT reference "frames", "stills", "images", or the camera analysis process
+- Write about the sky and the evening as if you watched it happen, not as if you're analyzing photos
 - No emojis, no hashtags
-- Do NOT use: "hit different", "still worth watching", "in their own way"
+- No "golden hour", "cozy vibes", inspirational language, or lifestyle-brand phrasing
+- Do NOT use: "hit different", "still worth watching", "in their own way", "clean progression"
 
 Caption:"""
 
@@ -481,42 +487,33 @@ Title:"""
         dominant_hex = self._get_dominant_colors_from_visual(visual)
         colors_line = f"Dominant sky colors: {', '.join(dominant_hex)}" if dominant_hex else ""
 
-        prompt = f"""Write a short social media caption for a daily sunset timelapse video from Pelham, Alabama.
+        prompt = f"""Write a short caption for a sunset timelapse video from Mont Vaughn Purvis (MVP), a home in Pelham, Alabama (Birmingham area).
 
-Data for this sunset:
+Data:
 - Date: {date_display}
 - Weather at sunset: {weather_line}
 - {sbs_line}
 {f'- {colors_line}' if colors_line else ''}
 
-The Sunset Brilliance Score (SBS) is a 0-100 measure of how colorful/dramatic
-the sunset was. Use it to calibrate your tone: 80+ is exceptional, 70+ is good,
-60+ is decent, 50+ is ordinary, below 50 is flat. Include the score in the caption.
+The SBS is a 0-100 score for how colorful the sunset was. Use it to calibrate
+your tone: 80+ exceptional, 70+ good, 60+ decent, 50+ ordinary, <50 flat.
 
-VOICE:
-- Direct, dry, observational. No performative enthusiasm.
-- Short sentences. No filler.
-- Never apologize for an unremarkable sunset. Just describe it honestly.
-- Sound like a real person who watches sunsets regularly and knows the difference between a good one and a fine one.
+VOICE — write like someone who actually lives here and pays attention:
+- Warm but never precious. Grounded in place. Quietly proud without being showy.
+- Observations over descriptions. Notice light, weather, stillness, or change — say it plainly.
+- Appalachian roots: understated relationship with land and home.
+- Dry humor is welcome. Sentiment is earned, not sprinkled.
 
 RULES:
 - 1-3 sentences max
-- Include the date and "Pelham, AL" naturally in the text
-- Include the weather conditions and temperature
-- Include the SBS score naturally (e.g., "SBS: 72" or "Brilliance score: 72")
+- Include the date and "Pelham, AL" naturally
+- Include the weather (temperature, conditions) naturally
+- Include the SBS score naturally (e.g., "SBS: 72")
 - End with "Camera: Reolink RLC810-WA" on its own line
-- Vary the structure. Don't start with "Sunset timelapse from..."
-- Do NOT claim weather events (rain, storms) unless the data explicitly confirms it
 - No emojis, no hashtags
-- Do NOT use: "hit different", "still worth watching", "in their own way", "nothing dramatic", "low-contrast", "without incident"
-- Do NOT call a 60+ SBS sunset flat/gray/washed out
-- Do NOT oversell a sub-50 SBS sunset
-
-Examples:
-  "{date_display}, Pelham, AL. Partly cloudy, 74°F. Clouds caught real color tonight — orange bled into pink for a good ten minutes. SBS: 78. Camera: Reolink RLC810-WA"
-  "Clear sky, 68°F. Sun dropped fast with nothing to catch the light. {date_display}, Pelham, AL. Brilliance score: 41. Camera: Reolink RLC810-WA"
-  "Overcast broke just enough to let some warm light through. {date_display}, Pelham, AL, 71°F. SBS: 63. Camera: Reolink RLC810-WA"
-  "Thick clouds over Pelham tonight. {date_display}, 65°F. Flat light, no color. SBS: 32. Camera: Reolink RLC810-WA"
+- No "golden hour", "cozy vibes", inspirational language, or lifestyle-brand phrasing
+- Do NOT use: "hit different", "still worth watching", "in their own way", "clean progression"
+- Do NOT oversell a flat sunset or undersell a good one
 
 Caption:"""
 
