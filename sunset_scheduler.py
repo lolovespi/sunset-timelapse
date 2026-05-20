@@ -594,11 +594,13 @@ class SunsetScheduler:
             from historical_retrieval import HistoricalRetrieval
             historical = HistoricalRetrieval()
 
-            # Attempt to retrieve and process historical footage
+            # Attempt to retrieve and process historical footage.
+            # Skip YouTube upload here — we'll handle it below with the same
+            # shared caption used for Facebook/Instagram.
             created_videos = historical.create_historical_timelapse(
                 yesterday,
                 yesterday,
-                upload_to_youtube=True
+                upload_to_youtube=False
             )
 
             if created_videos:
@@ -656,22 +658,27 @@ class SunsetScheduler:
                             f"Error uploading recovered video to Google Drive:\n\n{str(e)}"
                         )
 
-                # Post to Facebook + Instagram with shared caption
-                try:
-                    social_metadata = {
-                        'date': yesterday.isoformat(),
-                        'capture_date': yesterday.isoformat(),
-                    }
-                    if weather_block:
-                        social_metadata['weather'] = weather_block
-                    if visual_block:
-                        social_metadata['visual_analysis'] = visual_block
+                # Generate ONE shared caption for all platforms
+                social_metadata = {
+                    'date': yesterday.isoformat(),
+                    'capture_date': yesterday.isoformat(),
+                }
+                if weather_block:
+                    social_metadata['weather'] = weather_block
+                if visual_block:
+                    social_metadata['visual_analysis'] = visual_block
 
+                shared_caption = None
+                try:
                     shared_caption = self.facebook_uploader.generate_caption(
                         social_metadata, video_path=str(video_path)
                     )
                     self.logger.info(f"Recovery: Shared caption: {shared_caption}")
+                except Exception as e:
+                    self.logger.warning(f"Recovery: Caption generation failed: {e}")
 
+                # Post to Facebook + Instagram with shared caption
+                try:
                     fb_success = self.facebook_uploader.post_sunset(
                         video_path, social_metadata, caption_override=shared_caption
                     )
@@ -681,6 +688,23 @@ class SunsetScheduler:
                         self.logger.warning("Recovery: Facebook/Instagram posting failed")
                 except Exception as e:
                     self.logger.warning(f"Recovery: Facebook/Instagram error: {e}")
+
+                # Upload to YouTube with the same shared caption as description
+                try:
+                    yt_success = self.upload_to_youtube_with_sbs(
+                        video_path, yesterday,
+                        actual_start_time=sunset_start,
+                        actual_end_time=sunset_end,
+                        weather_block=weather_block,
+                        visual_block=visual_block,
+                        description_override=shared_caption,
+                    )
+                    if yt_success:
+                        self.logger.info("Recovery: Uploaded to YouTube")
+                    else:
+                        self.logger.warning("Recovery: YouTube upload failed")
+                except Exception as e:
+                    self.logger.warning(f"Recovery: YouTube upload error: {e}")
 
                 self.email_notifier.send_notification(
                     f"Automatic Recovery: {yesterday}",
