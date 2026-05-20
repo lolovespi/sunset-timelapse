@@ -107,10 +107,12 @@ class FacebookUploader:
             self.logger.error(f"Failed to save tracking database: {e}")
 
     def update_tracking_db(self, date_str: str, status: str, facebook_id: Optional[str] = None,
-                           instagram_id: Optional[str] = None):
+                           instagram_id: Optional[str] = None,
+                           facebook_reel_id: Optional[str] = None):
         """Update tracking database with posting status.
 
-        Merges with existing entry so Facebook and Instagram tracking are independent.
+        Merges with existing entry so Facebook post, Facebook Reel, and
+        Instagram tracking are independent.
         """
         db = self.load_tracking_db()
 
@@ -125,6 +127,10 @@ class FacebookUploader:
         if instagram_id:
             entry['instagram_id'] = instagram_id
             entry['instagram_posted_at'] = datetime.now(timezone.utc).isoformat()
+
+        if facebook_reel_id:
+            entry['facebook_reel_id'] = facebook_reel_id
+            entry['facebook_reel_posted_at'] = datetime.now(timezone.utc).isoformat()
 
         if status == 'posted':
             entry['posted_at'] = datetime.now(timezone.utc).isoformat()
@@ -710,6 +716,158 @@ Caption:"""
             self.logger.error(f"Instagram posting error: {e}")
             return None
 
+    def _render_portrait_for_reel(self, video_path: str) -> Optional[str]:
+        """
+        Render a 1080x1920 letterboxed portrait copy of the timelapse for
+        Facebook Reels / vertical platforms. Returns the path to the new
+        file, or None on failure. Original landscape video is unchanged.
+        """
+        import subprocess
+        src = Path(video_path)
+        if not src.exists():
+            self.logger.error(f"Source video not found: {video_path}")
+            return None
+
+        # Render alongside the original
+        out_path = src.with_name(f"{src.stem}_reel.mp4")
+        if out_path.exists() and out_path.stat().st_mtime > src.stat().st_mtime:
+            self.logger.info(f"Reel format already rendered: {out_path}")
+            return str(out_path)
+
+        # Scale landscape into a 1080x1920 canvas, black bars top/bottom
+        vf = "scale=1080:-2,pad=1080:1920:0:(1920-ih)/2:color=black"
+        cmd = [
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', str(src),
+            '-vf', vf,
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
+            str(out_path),
+        ]
+        try:
+            self.logger.info(f"Rendering portrait Reel format: {out_path.name}")
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
+            return str(out_path)
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Portrait render failed: {e.stderr or e.stdout}")
+            return None
+        except subprocess.TimeoutExpired:
+            self.logger.error("Portrait render timed out")
+            return None
+
+    def post_facebook_reel(self, video_path: str, caption: str) -> Optional[str]:
+        """
+        Post a video as a Facebook Reel using the Reels Sharing API.
+
+        Three-step flow:
+        1. Initialize upload (POST /{page_id}/video_reels?upload_phase=start)
+        2. Upload video binary to the returned upload_url
+        3. Publish (POST /{page_id}/video_reels?upload_phase=finish&video_state=PUBLISHED)
+
+        Args:
+            video_path: Path to local .mp4 file (will be rendered to portrait)
+            caption: Caption text with hashtags
+
+        Returns:
+            Facebook Reel video ID if successful, None otherwise
+        """
+        if not self.page_id or not self.page_access_token:
+            self.logger.error("Facebook credentials not configured for Reels")
+            return None
+
+        # Render portrait version (1080x1920 letterboxed)
+        reel_path = self._render_portrait_for_reel(video_path)
+        if not reel_path:
+            self.logger.error("Could not produce portrait Reel video")
+            return None
+
+        graph_url = f"https://graph.facebook.com/{self.GRAPH_API_VERSION}"
+
+        try:
+            # Step 1: Initialize upload
+            init_url = f"{graph_url}/{self.page_id}/video_reels"
+            init_resp = requests.post(
+                init_url,
+                data={'upload_phase': 'start', 'access_token': self.page_access_token},
+                timeout=60,
+            )
+            if init_resp.status_code != 200:
+                self.logger.error(f"Facebook Reel init failed [{init_resp.status_code}]: {init_resp.text}")
+                return None
+            init_data = init_resp.json()
+            video_id = init_data.get('video_id')
+            upload_url = init_data.get('upload_url')
+            if not video_id or not upload_url:
+                self.logger.error(f"Facebook Reel init missing fields: {init_data}")
+                return None
+            self.logger.info(f"Facebook Reel upload session started: video_id={video_id}")
+
+            # Step 2: Upload binary (resumable single-shot)
+            file_size = os.path.getsize(reel_path)
+            with open(reel_path, 'rb') as fh:
+                upload_resp = requests.post(
+                    upload_url,
+                    headers={
+                        'Authorization': f'OAuth {self.page_access_token}',
+                        'offset': '0',
+                        'file_size': str(file_size),
+                    },
+                    data=fh,
+                    timeout=600,
+                )
+            if upload_resp.status_code != 200:
+                self.logger.error(f"Facebook Reel upload failed [{upload_resp.status_code}]: {upload_resp.text}")
+                return None
+            self.logger.info("Facebook Reel binary uploaded, finalizing...")
+
+            # Step 3: Finalize (publish) — retry transient errors
+            import time
+            finish_url = init_url
+            last_error = None
+            for attempt in range(3):
+                if attempt > 0:
+                    wait = 30 * attempt
+                    self.logger.info(f"Facebook Reel publish retry {attempt}/3 after {wait}s...")
+                    time.sleep(wait)
+
+                finish_resp = requests.post(
+                    finish_url,
+                    data={
+                        'upload_phase': 'finish',
+                        'video_id': video_id,
+                        'video_state': 'PUBLISHED',
+                        'description': caption,
+                        'access_token': self.page_access_token,
+                    },
+                    timeout=120,
+                )
+                if finish_resp.status_code == 200:
+                    result = finish_resp.json()
+                    if result.get('success') or result.get('video_id') or video_id:
+                        self.logger.info(f"Facebook Reel published. Video ID: {video_id}")
+                        return video_id
+                    last_error = f"finish response: {finish_resp.text}"
+                else:
+                    last_error = f"status {finish_resp.status_code}: {finish_resp.text}"
+                    # Check for transient error
+                    try:
+                        err = finish_resp.json().get('error', {})
+                        is_transient = err.get('error_subcode') == 99 or err.get('code') == 1
+                    except (ValueError, AttributeError):
+                        is_transient = False
+                    if not is_transient:
+                        break
+                self.logger.warning(f"Facebook Reel publish attempt {attempt + 1} failed: {last_error}")
+
+            self.logger.error(f"Facebook Reel publish failed: {last_error}")
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Facebook Reel posting error: {e}")
+            return None
+
     def validate(self) -> bool:
         """Validate Facebook uploader configuration"""
         if not self.page_id:
@@ -754,9 +912,10 @@ Caption:"""
         entry = db.get(date_str, {})
         fb_already_posted = bool(entry.get('facebook_id'))
         ig_already_posted = bool(entry.get('instagram_id'))
+        fb_reel_already_posted = bool(entry.get('facebook_reel_id'))
 
-        if fb_already_posted and ig_already_posted:
-            self.logger.info(f"Sunset for {date_str} already posted to both Facebook and Instagram")
+        if fb_already_posted and ig_already_posted and fb_reel_already_posted:
+            self.logger.info(f"Sunset for {date_str} already posted to Facebook (post + reel) and Instagram")
             return True
 
         try:
@@ -768,13 +927,25 @@ Caption:"""
                 caption = self.generate_caption(metadata, video_path=video_path)
             full_caption = self.append_hashtags(caption)
 
-            # Post to Facebook if not already done
+            # Post to Facebook (regular video post) if not already done
             facebook_id = None
             if fb_already_posted:
                 self.logger.info(f"Facebook post for {date_str} already exists, skipping")
                 facebook_id = entry.get('facebook_id')
             else:
                 facebook_id = self.post_video(video_path, full_caption, date_str)
+
+            # Post as Facebook Reel if not already done
+            if fb_reel_already_posted:
+                self.logger.info(f"Facebook Reel for {date_str} already exists, skipping")
+            else:
+                try:
+                    reel_id = self.post_facebook_reel(str(video_path), full_caption)
+                    if reel_id:
+                        self.logger.info(f"Facebook Reel posted: {reel_id}")
+                        self.update_tracking_db(date_str, 'posted', facebook_reel_id=reel_id)
+                except Exception as e:
+                    self.logger.warning(f"Facebook Reel posting failed (non-critical): {e}")
 
             # Post to Instagram if not already done
             if ig_already_posted:
