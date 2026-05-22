@@ -123,3 +123,48 @@ class OpenMeteoClient:
             return False, []
 
         return True, reasons
+
+    def _merge_into_windows(
+        self,
+        qualifying: List[tuple],  # list of (datetime, confidence, reasons)
+    ) -> List[StormWindow]:
+        """
+        Merge strictly contiguous qualifying hours into windows.
+        A gap of any size between qualifying hours creates separate windows.
+        """
+        if not qualifying:
+            return []
+
+        windows: List[StormWindow] = []
+        cur_start = qualifying[0][0]
+        cur_end = cur_start + timedelta(hours=1)
+        cur_confidences = [qualifying[0][1]]
+        cur_reasons = list(qualifying[0][2])
+
+        for hour_time, conf, reasons in qualifying[1:]:
+            if hour_time == cur_end:
+                # Contiguous: extend
+                cur_end = hour_time + timedelta(hours=1)
+                cur_confidences.append(conf)
+                # Dedupe reasons across hours; first occurrence wins
+                for r in reasons:
+                    if r not in cur_reasons:
+                        cur_reasons.append(r)
+            else:
+                # Gap: emit current window, start new one
+                windows.append(StormWindow(
+                    start=cur_start, end=cur_end,
+                    confidence=sum(cur_confidences) / len(cur_confidences),
+                    reasons=cur_reasons,
+                ))
+                cur_start = hour_time
+                cur_end = hour_time + timedelta(hours=1)
+                cur_confidences = [conf]
+                cur_reasons = list(reasons)
+
+        windows.append(StormWindow(
+            start=cur_start, end=cur_end,
+            confidence=sum(cur_confidences) / len(cur_confidences),
+            reasons=cur_reasons,
+        ))
+        return windows

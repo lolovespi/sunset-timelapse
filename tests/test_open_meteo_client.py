@@ -86,3 +86,38 @@ def test_qualifies_handles_none_values():
     }
     qualifies, _ = client._qualifies(hour_data)
     assert qualifies is False
+
+
+def test_merge_contiguous_hours():
+    """Three consecutive qualifying hours merge into one window."""
+    client = OpenMeteoClient()
+    qualifying = [
+        (datetime(2026, 5, 21, 17, 0), 0.6, ['CAPE 1570', 'LI -4.6']),
+        (datetime(2026, 5, 21, 18, 0), 0.7, ['CAPE 1820', 'LI -4.7']),
+        (datetime(2026, 5, 21, 19, 0), 0.8, ['CAPE 1960', 'LI -5.1']),
+    ]
+    windows = client._merge_into_windows(qualifying)
+    assert len(windows) == 1
+    assert windows[0].start == datetime(2026, 5, 21, 17, 0)
+    assert windows[0].end == datetime(2026, 5, 21, 20, 0)  # last hour + 1
+    assert windows[0].confidence == pytest.approx(0.7, abs=0.01)
+
+
+def test_merge_with_gap_splits():
+    """Hours with a gap produce separate windows."""
+    client = OpenMeteoClient()
+    qualifying = [
+        (datetime(2026, 5, 21, 17, 0), 0.6, ['a']),
+        (datetime(2026, 5, 21, 18, 0), 0.6, ['b']),
+        (datetime(2026, 5, 21, 22, 0), 0.6, ['c']),  # gap
+        (datetime(2026, 5, 21, 23, 0), 0.6, ['d']),
+    ]
+    windows = client._merge_into_windows(qualifying)
+    assert len(windows) == 2
+    assert windows[0].end == datetime(2026, 5, 21, 19, 0)
+    assert windows[1].start == datetime(2026, 5, 21, 22, 0)
+
+
+def test_merge_empty_returns_empty():
+    client = OpenMeteoClient()
+    assert client._merge_into_windows([]) == []
