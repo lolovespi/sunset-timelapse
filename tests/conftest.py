@@ -8,6 +8,20 @@ import pytest
 
 
 FIXTURES_DIR = Path(__file__).parent / 'fixtures'
+REPO_ROOT = Path(__file__).parent.parent
+
+
+@pytest.fixture(autouse=True, scope='session')
+def use_example_config():
+    """
+    Point config_manager's global singleton at example-config.yaml so tests
+    don't require a real config.yaml (which is not checked in to the worktree).
+    """
+    import config_manager
+    config_manager.config = None  # reset any previously cached singleton
+    config_manager.config = config_manager.ConfigManager(
+        str(REPO_ROOT / 'example-config.yaml')
+    )
 
 
 @pytest.fixture
