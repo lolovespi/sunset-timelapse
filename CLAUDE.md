@@ -4,206 +4,129 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an automated sunset timelapse system that captures daily sunset images using a Reolink camera, processes them into videos, and uploads to YouTube. The system is designed for two deployment scenarios:
-- **Raspberry Pi**: Daily automated capture and scheduling
-- **MacBook/Desktop**: Historical footage processing and video creation
+Automated sunset timelapse system. A Reolink RLC810-WA camera captures images around sunset; FFmpeg assembles them into a video; the video is then distributed to YouTube, Facebook (Page + Reels), Instagram, and Google Drive. The system also scans overnight Reolink recordings for meteors.
+
+Two deployment targets share the same codebase:
+- **Raspberry Pi** — daily capture + scheduling, runs as a systemd service (`config-pi.yaml`)
+- **MacBook/desktop** — historical processing, meteor scans, manual operations (`config.yaml`)
 
 ## Key Commands
 
-### Development and Testing
 ```bash
-# Install dependencies
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Setup
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# System validation and testing
-python main.py test --camera --youtube --sunset  # Test all components
-python main.py test --camera      # Test camera connection only
-python main.py test --youtube     # Test YouTube authentication only
-python main.py test --sunset      # Show sunset calculation schedule
+# Validate everything before any deploy
+python main.py test --camera --youtube --sunset
 
-# Configuration management
-python main.py config --validate --show
-```
+# Daily operations (Pi)
+python main.py schedule --validate          # primary entry, runs forever
+python main.py schedule --immediate --duration 30  # immediate capture for testing
 
-### Daily Operations
-```bash
-# Run scheduler with validation (primary command for Raspberry Pi)
-python main.py schedule --validate
-
-# Immediate capture for testing (default: 5 minutes)
-python main.py schedule --immediate
-
-# Immediate capture with custom duration (e.g., 30 minutes)
-python main.py schedule --immediate --duration 30
-
-# Check system status
-python main.py status
-```
-
-### Historical Processing
-```bash
-# List available dates for processing
-python main.py historical --start 2024-01-01 --end 2024-01-31 --list
-
-# Process historical footage with YouTube upload
+# Historical (desktop)
+python main.py historical --start 2024-01-01 --end 2024-01-07 --list
 python main.py historical --start 2024-01-01 --end 2024-01-07 --upload
 
-# Process without uploading
-python main.py historical --start 2024-01-01 --end 2024-01-07
-```
-
-### Meteor Detection
-```bash
-# Search camera recordings for meteors in date range
-# Automatically uses sunset/sunrise times for nighttime-only scanning
+# Meteor scan over date range (auto-uses sunset/sunrise window)
 python main.py meteor --start 2024-01-01 --end 2024-01-07
-
-# Search with specific time window (override automatic sunset/sunrise)
-python main.py meteor --start 2024-01-01 --end 2024-01-07 --start-time 20:00 --end-time 05:00
-
-# Analyze a specific local video file
-python main.py meteor --analyze-video /path/to/video.mp4 --date 2024-01-01
-
-# Show meteor detection statistics
+python main.py meteor --analyze-video /path/to/file.mp4 --date 2024-01-01
 python main.py meteor --stats
+
+# One-off operations
+python main.py capture --duration 7200 --process --upload   # capture N seconds, then assemble + upload
+python main.py upload --date 2024-09-15                      # re-upload an existing video
+python main.py stream --duration 30 --platforms facebook,youtube --test
+python main.py sbs --date 2024-09-15 --report
+python main.py status
+python main.py config --validate --show
+python main.py cleanup --dry-run
 ```
+
+There is **no pytest suite wired up** — `pytest` is in requirements but `tests/` does not exist. `main.py test` is the de facto validation harness; add new component checks there rather than under a separate test runner.
 
 ## Architecture
 
-### Core Components
+### Daily workflow (the most important code path to understand)
 
-1. **main.py** - CLI entry point with subcommands for different operations
-2. **config_manager.py** - Configuration loading from YAML and environment variables with secure secrets handling
-3. **sunset_calculator.py** - Astronomical calculations for sunset times using the Astral library
-4. **camera_interface.py** - ONVIF camera control for image capture
-5. **video_processor.py** - FFmpeg-based video creation from image sequences
-6. **youtube_uploader.py** - Google API integration for YouTube uploads
-7. **sunset_scheduler.py** - Main orchestrator that coordinates daily operations
-8. **historical_retrieval.py** - Bulk processing of historical camera footage
-9. **meteor_detector.py** - OpenCV-based meteor detection and clip extraction
+`SunsetScheduler.complete_daily_workflow()` in `sunset_scheduler.py` is the orchestrator. Reading top-to-bottom is the fastest way to understand how pieces fit together:
 
-### Configuration System
+1. **Capture** — `camera_interface.py` pulls JPEGs at `capture.interval_seconds` between `time_before_sunset_minutes` and `time_after_sunset_minutes`. Sunset times come from `sunset_calculator.py` (Astral).
+2. **Process** — `video_processor.py` runs FFmpeg (`libx264`, `video.fps` from config, currently 60).
+3. **SBS report** — `sbs_reporter.py` aggregates per-frame metrics that `sunset_brilliance_score.py` computed *during capture*. SBS is real-time on the Pi, not a post-process.
+4. **Weather + visual** — `tempest_api.py` pulls a weather block; `visual_analyzer.py` samples frames for sunset-type/intensity tags. Both feed downstream metadata; both are best-effort (caught and logged).
+5. **Drive upload** — `drive_uploader.py` pushes the video + JSON metadata.
+6. **One shared AI caption** — `FacebookUploader.generate_caption()` calls Anthropic (Haiku 4.5) with several sampled frames (vision-based) to write a 2-3 sentence caption. The *same* caption is then used for Facebook, Instagram, Facebook Reel, and the YouTube description. There is no separate AI-generated YouTube title — titles are deterministic `Sunset MM/DD/YY` (see commit `3a7213d`).
+7. **Social posts** — `facebook_uploader.py` posts the standard video to FB Page, cross-posts to Instagram, and posts a portrait-rendered version as a Facebook Reel.
+8. **YouTube** — `youtube_uploader.py` uploads with the shared caption as the description.
+9. **Maintenance** — token refresh, file cleanup, SBS retention.
 
-The system uses a two-tier configuration approach:
-- **config.yaml**: Main configuration for location, camera settings, capture parameters, video settings
-- **.env**: Sensitive data like camera passwords and Google credentials paths
+If a step needs to change, edit `complete_daily_workflow` first — it's the contract every other module is plugged into.
 
-### Key Dependencies
+### Module map
 
-- **astral**: Astronomical calculations for sunset timing
-- **onvif-zeep**: Camera control via ONVIF protocol
-- **ffmpeg-python**: Video processing wrapper
-- **google-api-python-client**: YouTube API integration
-- **schedule**: Task scheduling for Raspberry Pi operations
-- **colorlog**: Enhanced logging with color output
-- **opencv-python-headless**: Computer vision for meteor detection and SBS analysis
-- **numpy/scipy**: Mathematical operations for image analysis
+| File | Responsibility |
+|---|---|
+| `main.py` | argparse CLI; one `cmd_*` function per subcommand |
+| `sunset_scheduler.py` | Orchestrator. `complete_daily_workflow`, `run_scheduler` (the systemd entry), `run_overnight_meteor_scan` |
+| `config_manager.py` | Loads `config.yaml` (or `config-pi.yaml` on the Pi) + `.env`. Centralizes secrets and paths |
+| `sunset_calculator.py` | Astral-based sunset times + capture windows |
+| `camera_interface.py` | ONVIF (port 8000) + Reolink API; capture, recording search, download |
+| `video_processor.py` | FFmpeg wrapper for assembling JPEGs into MP4 |
+| `youtube_uploader.py` | OAuth + upload; includes proactive token refresh and health alerts |
+| `facebook_uploader.py` | FB Page + Instagram + FB Reels posting. Also owns AI-caption generation (Anthropic). `_render_portrait_for_reel` handles 9:16 reformat |
+| `drive_uploader.py` | Google Drive backup for videos, meteor clips, and JSON metadata |
+| `tempest_api.py` / `tempest_monitor.py` | Tempest weather station UDP + REST; storm-trigger detection |
+| `visual_analyzer.py` | Per-video sunset classification (type, intensity, dominant colors) |
+| `sunset_brilliance_score.py` / `sbs_reporter.py` | Real-time per-frame scoring during capture + daily aggregation |
+| `historical_retrieval.py` | Pulls historical recordings from the camera and assembles per-day videos |
+| `meteor_detector.py` | OpenCV multi-frame + single-frame meteor detection, dedup, clip extraction |
+| `email_notifier.py` | SMTP notifications for uploads, failures, token expiry, meteor finds |
+| `live_streamer.py` / `live_youtube.py` / `live_facebook.py` / `rtmp_streamer.py` | RTMP-based live broadcast support |
 
-## Development Notes
+### Configuration system
 
-### Camera Integration
-The system connects to Reolink cameras via ONVIF protocol on port 8000. Camera credentials are stored securely in environment variables.
+- `config.yaml` — desktop/Mac config, the canonical reference. **Has duplicate `sbs:` blocks intentionally** (legacy v1 + v2 keys merged); both are read.
+- `config-pi.yaml` — Pi-specific config (different `storage.base_path`, sometimes different camera IP). The Pi's `update_pi.sh` swaps this in. Don't assume `config.yaml` is what's running on the Pi.
+- `example-config.yaml` — sanitized template for new deploys.
+- `.env`, `.env.pi`, `.env.mac` — secrets. **Never read or display these.** All sensitive values (camera password, `ANTHROPIC_API_KEY`, Google credentials path, SMTP password, Tempest token, Facebook tokens in `facebook_config.json`) live here.
 
-### Video Processing
-Videos are created using FFmpeg with H.264 encoding at 12 FPS. The FPS is calculated based on 5-second capture intervals to create real-time playback.
+### AI captions
 
-### Storage Management
-Images are organized by date and automatically cleaned up after 7 days. Videos are deleted locally after 1 day (post-upload).
+`facebook_uploader.py` uses `claude-haiku-4-5-20251001` with vision (4–5 sampled frames from the rendered video) to produce the social caption. If vision fails, it falls back to text-only with the same prompt; if Anthropic is unreachable, `_build_fallback_caption` synthesizes one from metadata.
 
-### Deployment Differences
-- **Raspberry Pi**: Uses systemd service for continuous operation, storage at `/home/pi/sunset_timelapse`
-- **MacBook**: Manual operation for historical processing, storage at `/Users/username/sunset_timelapse`
+**Caption voice (enforced by the prompt and by user preference):** direct, dry, observational. No hype, no slang ("vibes", "epic", "literal magic"), no repeating the word "muted". When editing the prompt in `_build_caption_prompt`, preserve this tone — it has been tuned through multiple iterations. Vision-based captions are known to be meaningfully better than text-only; do not regress to text-only as a default.
 
-### Security Practices
-- All secrets in environment variables (never in code)
-- Camera passwords and Google credentials are never logged
-- Configuration validation prevents missing security settings
+## Known issues and gotchas
 
-## Meteor Detection System
+**Meteor parallel-processing bottleneck.** `meteor_detector.py` uses `ProcessPoolExecutor` (3 workers) on desktop and sequential on Pi (detected via `platform.machine()` and `/proc/device-tree/model`). Workers re-initialize heavy CV objects per video → roughly 36× slowdown vs. an ideal pool. Full-night scans take ~12h instead of ~20min. Workaround: use targeted time windows. Real fix would refactor workers to reuse state.
 
-### Overview
-The meteor detection system analyzes historical camera recordings to identify and extract meteor events using OpenCV-based computer vision algorithms.
+**SBS config has two blocks.** `config.yaml` defines `sbs:` twice; both contribute (later block overrides earlier on key collision). When changing SBS keys, search for both blocks.
 
-### Detection Algorithm
-- **Multi-frame tracking**: Tracks bright objects across consecutive frames for sustained meteors
-- **Single-frame detection**: Identifies fast-moving streaks in individual frames
-- **Validation filters**: Multiple criteria to distinguish meteors from false positives
+**FPS source-of-truth is `config.yaml`, not the CLAUDE/README narrative.** Current value is `video.fps: 60` (5s interval → 5× real-time playback). Older docs say 12 — trust the config.
 
-### False Positive Filtering
+**Token refresh is proactive, not lazy.** `youtube_uploader.refresh_token_proactively()` is called in daily maintenance; expiration emails fire only when refresh *fails*. Don't add lazy-refresh paths that would double-alert.
 
-**Max Velocity Filter** (config: `meteor.max_velocity`, default: 25.0 px/frame)
-- Rejects fast-moving aircraft and satellites
-- Based on confirmed meteor velocity analysis: 6.39 - 20.33 px/frame
-- Threshold provides safety margin while filtering extreme velocities (26+ px/frame)
+**Pi vs desktop branching is by platform detection, not by env var.** `meteor_detector.py` checks `platform.machine()` and the device-tree file. If you add platform-conditional logic elsewhere, follow that same pattern rather than introducing a new flag.
 
-**Linearity Score** (config: `meteor.linearity_threshold`, default: 0.95)
-- Validates meteor paths follow straight trajectories
-- Rejects erratic movements (insects, birds, debris)
+**Don't auto-fix `historical_process.log` or other large checked-in logs.** They're intentional artifacts of past runs.
 
-**Sky Region Filtering** (config: `meteor.sky_region_top/bottom`)
-- Focuses detection on upper portion of frame where meteors occur
-- Reduces ground-based false positives
+## Meteor detection — quick reference
 
-### Platform-Specific Behavior
+Detection combines:
+- Multi-frame tracking for sustained meteors (`min_frames`–`max_frames` window)
+- Single-frame streak detection for very fast events
 
-**Desktop (Mac/Windows/Linux x86)**
-- Uses parallel processing with ProcessPoolExecutor (3 workers)
-- Significantly faster for bulk historical scans
-- Automatically detected via platform checks
+False-positive filters (all in `meteor:` config):
+- `max_velocity: 25.0` px/frame — rejects aircraft/satellites (confirmed meteors: 6.4–20.3 px/frame)
+- `min_linearity: 0.80` — rejects erratic paths (insects, birds)
+- `sky_region_top` / `sky_region_bottom` — restricts to upper half of the frame
+- `min_brightness_threshold`, `min_area`/`max_area`
 
-**Raspberry Pi (ARM/aarch64)**
-- Uses sequential processing to prevent resource exhaustion
-- Detected via multiple methods:
-  - Platform machine check (`'arm'` or `'aarch'` in platform.machine())
-  - Raspberry Pi device tree file check (`/proc/device-tree/model` exists)
-- Prevents worker process spawning that could overwhelm Pi resources
+Output: `data/meteors/<clip>.mp4` + matching `.json` with timestamp, velocity, linearity, brightness, source recording. Clips with CST/CDT timestamps in filenames. Auto-uploaded to a `meteors` subfolder in Drive; email notifications fire on each detection.
 
-### Known Issues
+## Deployment
 
-**Performance Bottleneck in Parallel Processing**
-- Each worker process re-initializes heavy objects for every video
-- Causes ~36x slowdown compared to expected parallel performance
-- Issue: ProcessPoolExecutor workers don't share state
-- Impact: 173 videos takes ~12 hours instead of ~20 minutes
-- Workaround: Use targeted time windows instead of full-night scans
-- Fix needed: Refactor worker architecture to reuse initialized objects
-
-### Configuration Example
-```yaml
-meteor:
-  enabled: true
-  linearity_threshold: 0.95
-  max_velocity: 25.0              # Max 25 px/frame to reject aircraft
-  sky_region_top: 0.0             # Top 0% of frame
-  sky_region_bottom: 0.5          # Bottom 50% of frame
-```
-
-### Output Structure
-Detected meteors are saved to `data/meteors/` with:
-- **Video clip** (`.mp4`): Extracted frames showing the meteor
-- **Metadata** (`.json`): Detection parameters, timestamps, velocity, linearity score
-
-Example metadata:
-```json
-{
-  "timestamp": "2024-11-15T18:53:24.123456",
-  "duration_frames": 6,
-  "duration_seconds": 0.45,
-  "max_brightness": 255.0,
-  "linearity_score": 0.958,
-  "velocity": 9.05,
-  "detection_type": "multi_frame",
-  "source_recording": "RecM04_20241115_185320_185521.mp4"
-}
-```
-
-## Testing Strategy
-
-Always run system validation before deployment:
-```bash
-python main.py test --camera --youtube --sunset
-```
-
-This validates camera connectivity, YouTube authentication, and sunset calculation accuracy.
+- **Pi**: `update_pi.sh` (stash → pull → restore → restart `sunset-timelapse.service` → status check). Service runs `python main.py schedule --validate` under `/home/pi/sunset-timelapse`.
+- **Desktop**: manual `git pull`; no service.
+- `sync_credentials.sh` syncs OAuth tokens between machines when needed.

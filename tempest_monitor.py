@@ -5,16 +5,18 @@ Detects storm conditions and triggers timelapse captures
 """
 
 import logging
+import math
 import socket
 import json
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Callable
+from typing import Optional, Dict, List, Callable, Tuple
 from collections import deque
 from dataclasses import dataclass, field
 
 from config_manager import get_config
+from geography_calculator import GeographyCalculator
 
 
 @dataclass
@@ -111,6 +113,15 @@ class TempestMonitor:
 
         # Callbacks for storm events
         self.storm_callbacks: List[Callable[[StormConditions], None]] = []
+
+        # Geography for FOV-based visibility heuristics
+        self.geography = GeographyCalculator()
+        self.visibility_fov_margin_deg = self.config.get(
+            'tempest.visibility.fov_margin_degrees', 30
+        )
+        self.visibility_min_observations = self.config.get(
+            'tempest.visibility.min_observations', 5
+        )
 
         if not self.enabled:
             self.logger.info("Tempest monitor disabled in configuration")
@@ -474,6 +485,12 @@ class TempestMonitor:
                 for reason in conditions.trigger_reasons:
                     self.logger.info(f"  • {reason}")
 
+                visible, vis_reason = self.is_storm_likely_visible()
+                self.logger.info(
+                    f"  • FOV visibility heuristic: {'likely visible' if visible else 'unclear'} "
+                    f"({vis_reason})"
+                )
+
                 # Call registered callbacks
                 for callback in self.storm_callbacks:
                     try:
@@ -487,6 +504,68 @@ class TempestMonitor:
             if self.storm_active:
                 self.logger.info("Storm conditions have cleared")
                 self.storm_active = False
+
+    def is_storm_likely_visible(
+        self,
+        window_minutes: int = 15,
+    ) -> Tuple[bool, str]:
+        """
+        Heuristic: is an approaching storm likely to cross the camera's FOV?
+
+        Tempest doesn't report lightning bearing, so strict FOV gating on strikes
+        isn't possible. Instead, use surface wind direction (which Tempest does
+        report) as a proxy for the direction weather is moving FROM. If recent
+        wind is from within the camera's viewing arc (plus a margin to account
+        for storms that pass through the cone), the storm is likely visible.
+
+        Returns:
+            (visible, reason). `visible=False` with reason "insufficient data"
+            means we don't know yet — caller should not treat as a veto.
+        """
+        if not self.observations:
+            return False, "insufficient data (no observations)"
+
+        now = datetime.now()
+        cutoff = now - timedelta(minutes=window_minutes)
+        recent = [o for o in self.observations if o.timestamp >= cutoff]
+
+        if len(recent) < self.visibility_min_observations:
+            return False, f"insufficient data ({len(recent)} obs in last {window_minutes} min)"
+
+        # Circular mean of wind direction (degrees, "from")
+        sin_sum = sum(math.sin(math.radians(o.wind_direction)) for o in recent)
+        cos_sum = sum(math.cos(math.radians(o.wind_direction)) for o in recent)
+        mean_from = math.degrees(math.atan2(sin_sum, cos_sum)) % 360
+
+        cone = self.geography.get_viewing_cone()
+        margin = self.visibility_fov_margin_deg
+        lo = (cone.azimuth_min - margin) % 360
+        hi = (cone.azimuth_max + margin) % 360
+
+        if lo > hi:
+            in_arc = mean_from >= lo or mean_from <= hi
+        else:
+            in_arc = lo <= mean_from <= hi
+
+        # Pressure trend over the same window (negative = falling)
+        pressure_change = recent[-1].pressure - recent[0].pressure
+        falling = pressure_change <= -0.5  # 0.5 hPa drop is a meaningful signal
+
+        if in_arc and falling:
+            return True, (
+                f"wind from {mean_from:.0f}° (camera arc "
+                f"{lo:.0f}°–{hi:.0f}° incl. {margin}° margin), "
+                f"pressure {pressure_change:+.1f} hPa"
+            )
+        if in_arc:
+            return True, (
+                f"wind from {mean_from:.0f}° within camera arc "
+                f"{lo:.0f}°–{hi:.0f}° (pressure flat: {pressure_change:+.1f} hPa)"
+            )
+        return False, (
+            f"wind from {mean_from:.0f}° outside camera arc "
+            f"{lo:.0f}°–{hi:.0f}°"
+        )
 
     def get_current_conditions(self) -> Optional[WeatherObservation]:
         """Get most recent weather observation"""
