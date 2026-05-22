@@ -64,3 +64,62 @@ class OpenMeteoClient:
                 "OpenMeteoClient requires 'location.latitude' and 'location.longitude' "
                 "in config"
             )
+
+    def _qualifies(self, hour_data: Dict) -> tuple[bool, List[str]]:
+        """
+        Evaluate whether one hour's forecast meets storm-watch criteria.
+
+        Returns (qualifies, reasons). qualifies=False on any None input.
+        """
+        cape = hour_data.get('cape')
+        lifted_index = hour_data.get('lifted_index')
+        wind_dir = hour_data.get('wind_direction_10m')
+        precip_prob = hour_data.get('precipitation_probability') or 0
+        weather_code = hour_data.get('weather_code') or 0
+        cloud_cover = hour_data.get('cloud_cover') or 0
+
+        # Bail on None for required fields
+        if cape is None or lifted_index is None or wind_dir is None:
+            return False, []
+
+        reasons = []
+
+        # CAPE
+        if cape < self.cape_min:
+            return False, []
+        reasons.append(f"CAPE {cape:.0f}")
+
+        # Lifted index (negative = unstable; smaller = more unstable)
+        if lifted_index > self.lifted_index_max:
+            return False, []
+        reasons.append(f"LI {lifted_index:.1f}")
+
+        # Wind direction in camera arc + margin
+        cone = self.geography.get_viewing_cone()
+        margin = self.wind_fov_margin
+        lo = (cone.azimuth_min - margin) % 360
+        hi = (cone.azimuth_max + margin) % 360
+        if lo > hi:
+            in_arc = wind_dir >= lo or wind_dir <= hi
+        else:
+            in_arc = lo <= wind_dir <= hi
+        if not in_arc:
+            return False, []
+        reasons.append(f"wind {wind_dir}°")
+
+        # At least one of: precip prob, weather code, cloud cover
+        any_triggered = False
+        if precip_prob >= self.precip_prob_min:
+            reasons.append(f"precip {precip_prob}%")
+            any_triggered = True
+        if weather_code >= self.weather_code_min:
+            reasons.append(f"WMO {weather_code}")
+            any_triggered = True
+        if cloud_cover >= self.cloud_cover_min:
+            reasons.append(f"cloud {cloud_cover}%")
+            any_triggered = True
+
+        if not any_triggered:
+            return False, []
+
+        return True, reasons
