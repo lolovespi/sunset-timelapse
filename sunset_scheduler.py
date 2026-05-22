@@ -609,6 +609,18 @@ class SunsetScheduler:
                 video_path = created_videos[0]
                 sunset_start, sunset_end = self.sunset_calc.get_capture_window(yesterday)
 
+                # Create 12s short version for FB/IG (5x speed)
+                short_video_path = video_path.with_name(
+                    f"{video_path.stem}_short.mp4"
+                )
+                if not self.video_processor.create_short_version(
+                    video_path, short_video_path, speed_factor=5.0
+                ):
+                    self.logger.warning(
+                        "Recovery: Short video creation failed — FB/IG will use main video"
+                    )
+                    short_video_path = video_path
+
                 # Gather weather and visual data for all platforms
                 weather_block = None
                 visual_block = None
@@ -677,10 +689,10 @@ class SunsetScheduler:
                 except Exception as e:
                     self.logger.warning(f"Recovery: Caption generation failed: {e}")
 
-                # Post to Facebook + Instagram with shared caption
+                # Post to Facebook + Instagram with shared caption (use short version)
                 try:
                     fb_success = self.facebook_uploader.post_sunset(
-                        video_path, social_metadata, caption_override=shared_caption
+                        short_video_path, social_metadata, caption_override=shared_caption
                     )
                     if fb_success:
                         self.logger.info("Recovery: Posted to Facebook/Instagram")
@@ -794,13 +806,25 @@ class SunsetScheduler:
                 # Email notification already sent in capture_sunset_sequence
                 return False
                 
-            # Step 2: Process into video
+            # Step 2: Process into video (main 60s version)
             video_path = self.process_captured_images(target_date)
             if not video_path:
                 self.logger.error("Video processing failed, aborting workflow")
                 # Email notification already sent in process_captured_images
                 return False
-                
+
+            # Step 2.5: Create the 12s short version for FB/IG (5x speed)
+            short_video_path = video_path.with_name(
+                f"{video_path.stem}_short.mp4"
+            )
+            if not self.video_processor.create_short_version(
+                video_path, short_video_path, speed_factor=5.0
+            ):
+                self.logger.warning(
+                    "Short video creation failed — FB/IG will use main video"
+                )
+                short_video_path = video_path
+
             # Step 3: Generate SBS report and enhance video metadata
             sbs_report = self.sbs_reporter.generate_daily_report(target_date)
             if sbs_report:
@@ -894,10 +918,10 @@ class SunsetScheduler:
             )
             self.logger.info(f"Shared caption: {shared_caption}")
 
-            # Step 4.7: Post to Facebook + Instagram
+            # Step 4.7: Post to Facebook + Instagram (use short version)
             try:
                 fb_success = self.facebook_uploader.post_sunset(
-                    video_path, social_metadata, caption_override=shared_caption
+                    short_video_path, social_metadata, caption_override=shared_caption
                 )
                 if fb_success:
                     self.logger.info("Successfully posted to Facebook")
