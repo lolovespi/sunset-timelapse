@@ -58,3 +58,9 @@ class OpenMeteoClient:
         self.latitude = location.get('latitude')
         self.longitude = location.get('longitude')
         self.timezone = location.get('timezone', 'America/Chicago')
+
+        if self.latitude is None or self.longitude is None:
+            raise ValueError(
+                "OpenMeteoClient requires 'location.latitude' and 'location.longitude' "
+                "in config"
+            )

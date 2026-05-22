@@ -18,10 +18,11 @@ def use_example_config():
     don't require a real config.yaml (which is not checked in to the worktree).
     """
     import config_manager
-    config_manager.config = None  # reset any previously cached singleton
     config_manager.config = config_manager.ConfigManager(
         str(REPO_ROOT / 'example-config.yaml')
     )
+    yield
+    config_manager.config = None
 
 
 @pytest.fixture
