@@ -220,8 +220,8 @@ def test_complete_storm_workflow_happy_path(monkeypatch, tmp_path, storm_strikes
                         lambda metadata, video_path=None: "Caption text")
     monkeypatch.setattr(wf.facebook_uploader, 'post_sunset',
                         lambda video_path, metadata, caption_override=None: True)
-    monkeypatch.setattr(wf.youtube_uploader, 'upload_video',
-                        lambda video_path, title, description, **kwargs: 'yt_id_123')
+    monkeypatch.setattr(wf.youtube_uploader, 'upload_video_with_sbs_enhancements',
+                        lambda video_path, video_date, start_time, end_time, **kwargs: 'yt_id_123')
     monkeypatch.setattr(wf.email_notifier, 'send_notification', lambda subject, body: None)
 
     conditions = StormConditions(

@@ -425,8 +425,12 @@ class StormWorkflow:
                 description = self._build_youtube_description(
                     shared_caption, sis, metadata,
                 )
-                self.youtube_uploader.upload_video(
-                    video_path, youtube_title, description,
+                duration = self._compute_storm_duration_seconds()
+                yt_end_time = start_time + timedelta(seconds=duration)
+                self.youtube_uploader.upload_video_with_sbs_enhancements(
+                    video_path, target_date, start_time, yt_end_time,
+                    title_override=youtube_title,
+                    description_override=description,
                 )
             except Exception as e:
                 self.logger.warning(f"[STORM] YouTube upload failed: {e}")
