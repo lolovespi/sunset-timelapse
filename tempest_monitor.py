@@ -113,6 +113,7 @@ class TempestMonitor:
 
         # Callbacks for storm events
         self.storm_callbacks: List[Callable[[StormConditions], None]] = []
+        self.armed = False
 
         # Geography for FOV-based visibility heuristics
         self.geography = GeographyCalculator()
@@ -141,6 +142,32 @@ class TempestMonitor:
         """
         self.storm_callbacks.append(callback)
         self.logger.info(f"Registered storm callback: {callback.__name__}")
+
+    def arm(self):
+        """Allow storm callbacks to fire. Called by scheduler when entering a watch window."""
+        if not self.armed:
+            self.logger.info("TempestMonitor armed — storm callbacks now active")
+        self.armed = True
+
+    def disarm(self):
+        """Suppress storm callbacks. Called by scheduler when outside watch windows."""
+        if self.armed:
+            self.logger.info("TempestMonitor disarmed — storm callbacks suppressed")
+        self.armed = False
+
+    def _fire_storm_callbacks(self, conditions):
+        """Fire all registered storm callbacks IF armed. Centralized for testability."""
+        if not self.armed:
+            self.logger.debug(
+                f"Storm conditions met (confidence {conditions.confidence:.1%}) "
+                "but TempestMonitor is disarmed — callbacks suppressed"
+            )
+            return
+        for callback in self.storm_callbacks:
+            try:
+                callback(conditions)
+            except Exception as e:
+                self.logger.error(f"Error in storm callback {callback.__name__}: {e}")
 
     def start_udp_listener(self):
         """Start UDP listener in background thread"""
@@ -492,11 +519,7 @@ class TempestMonitor:
                 )
 
                 # Call registered callbacks
-                for callback in self.storm_callbacks:
-                    try:
-                        callback(conditions)
-                    except Exception as e:
-                        self.logger.error(f"Error in storm callback {callback.__name__}: {e}")
+                self._fire_storm_callbacks(conditions)
 
                 self.last_storm_capture_time = now
         else:
