@@ -94,7 +94,7 @@ def compute_storm_intensity_score(
     # Component scores
     lightning_pts = lightning_count * weights['lightning']
     if avg_distance is not None:
-        distance_pts = (40.0 / max(avg_distance, 5.0)) * weights['distance'] / 20.0
+        distance_pts = (40.0 / max(avg_distance, 5.0)) * weights['distance']
     else:
         distance_pts = 0.0
     rain_pts = rain_max * weights['rain']
