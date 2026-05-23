@@ -1,6 +1,7 @@
 """Tests for storm workflow components."""
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -135,3 +136,34 @@ def test_storm_metadata_path(tmp_path, monkeypatch):
     path = wf._storm_metadata_path(target)
     assert path.parent.name == '2026-05-21'
     assert path.name == 'storm_metadata.json'
+
+
+def test_capture_storm_sequence_calls_camera(monkeypatch):
+    """_capture_storm_sequence delegates to camera.capture_video_sequence
+    with the right time bounds and a cancel_event."""
+    from storm_workflow import StormWorkflow
+    from datetime import datetime
+    import threading
+
+    wf = StormWorkflow()
+
+    calls = []
+    def fake_capture(start_time, end_time, interval_seconds, cancel_event=None):
+        calls.append({
+            'start': start_time, 'end': end_time,
+            'interval': interval_seconds,
+            'cancel_event': cancel_event,
+        })
+        return [Path('/tmp/fake_frame.jpg')]
+
+    monkeypatch.setattr(wf.camera, 'capture_video_sequence', fake_capture)
+
+    start = datetime(2026, 5, 21, 21, 0)
+    cancel_event = threading.Event()
+    images = wf._capture_storm_sequence(start, cancel_event=cancel_event)
+
+    assert len(images) == 1
+    assert len(calls) == 1
+    assert calls[0]['cancel_event'] is cancel_event
+    duration = (calls[0]['end'] - calls[0]['start']).total_seconds()
+    assert duration == wf._compute_storm_duration_seconds()

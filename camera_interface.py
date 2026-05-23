@@ -4,6 +4,7 @@ Uses direct RTSP for camera control and image capture
 """
 
 import logging
+import threading
 import time
 import io
 from datetime import datetime, timedelta
@@ -187,8 +188,9 @@ class CameraInterface:
         # Use RTSP method directly (skip ONVIF)
         return self.capture_snapshot_rtsp(save_path)
         
-    def capture_video_sequence(self, start_time: datetime, end_time: datetime, 
-                              interval_seconds: int = 5) -> List[Path]:
+    def capture_video_sequence(self, start_time: datetime, end_time: datetime,
+                              interval_seconds: int = 5,
+                              cancel_event: Optional['threading.Event'] = None) -> List[Path]:
         """
         Capture video via RTSP and extract frames at specified intervals using chunked recording
         
@@ -228,6 +230,14 @@ class CameraInterface:
 
             # Record each chunk
             for chunk_idx in range(chunks_needed):
+                # Cancellation check between chunks (granularity = chunk_duration_minutes)
+                if cancel_event is not None and cancel_event.is_set():
+                    self.logger.info(
+                        f"Capture cancelled after chunk {chunk_idx}/{chunks_needed} — "
+                        f"returning {len(captured_images)} images captured so far"
+                    )
+                    return captured_images
+
                 chunk_end_time = min(current_time + timedelta(seconds=chunk_duration), end_time)
                 actual_chunk_duration = (chunk_end_time - current_time).total_seconds()
 

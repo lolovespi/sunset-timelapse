@@ -178,6 +178,41 @@ class StormWorkflow:
             json.dump(metadata, f, indent=2, default=str)
         self.logger.info(f"Storm metadata persisted to {path}")
 
+    def _capture_storm_sequence(
+        self,
+        start_time: datetime,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> List[Path]:
+        """
+        Capture storm frames using the existing camera capture path.
+
+        Duration is fixed (no continuous Tempest polling during capture) — see
+        spec non-goals. Cancellation supported between camera chunks (~15 min).
+
+        Args:
+            start_time: when capture starts (naive datetime, local time)
+            cancel_event: optional threading.Event; capture exits early when set
+
+        Returns:
+            List of captured frame paths (possibly empty if camera failed)
+        """
+        duration_seconds = self._compute_storm_duration_seconds()
+        end_time = start_time + timedelta(seconds=duration_seconds)
+        interval = self.config.get('capture.interval_seconds', 5)
+
+        self.logger.info(
+            f"Storm capture window: {start_time} → {end_time} "
+            f"({duration_seconds // 60} min, interval {interval}s)"
+        )
+
+        try:
+            return self.camera.capture_video_sequence(
+                start_time, end_time, interval, cancel_event=cancel_event,
+            )
+        except Exception as e:
+            self.logger.error(f"Storm capture failed: {e}")
+            return []
+
     def complete_storm_workflow(self, *args, **kwargs):
         """Stub — full implementation lands in Task 12."""
         raise NotImplementedError("complete_storm_workflow lands in Task 12")
