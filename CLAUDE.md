@@ -63,6 +63,25 @@ There is **no pytest suite wired up** — `pytest` is in requirements but `tests
 
 If a step needs to change, edit `complete_daily_workflow` first — it's the contract every other module is plugged into.
 
+### Storm capture workflow (parallel to sunset)
+
+`StormWorkflow.complete_storm_workflow()` in `storm_workflow.py` mirrors the sunset workflow but for thunderstorms. Triggered by a layered detection chain:
+
+1. `OpenMeteoClient.get_storm_watch_windows()` polls Open-Meteo every 30 min (15 min when inside a window). Identifies hours that pass CAPE/LI/wind-direction/precip triggers; merges contiguous qualifying hours into windows.
+2. `SunsetScheduler.update_storm_watch_windows()` reconciles state; calls `_reconcile_tempest_arming()` to arm/disarm `TempestMonitor` based on window proximity (default: arm 30 min before, disarm 30 min after).
+3. When armed AND Tempest's `_evaluate_storm_conditions` fires, `SunsetScheduler.on_storm_detected` aborts any active sunset capture (via `cancel_event`) and runs `complete_storm_workflow`.
+4. Storm workflow: capture → recovery-if-needed (via `historical_retrieval` from camera SD) → SIS computation (Tempest data only, no video analysis) → metadata persistence → Drive backup → shared AI caption (`event_type='storm'` branch of `_build_caption_prompt`) → FB/IG/Reels/YouTube.
+5. Failed captures queue in `data/storms/pending_recovery.json` and get one retry during morning maintenance.
+
+**Key config keys:**
+- `open_meteo.enabled` / `open_meteo.poll_interval_minutes` / `open_meteo.triggers.*`
+- `tempest.enabled` / `tempest.capture.*` (cooldown, max duration, post-storm minutes)
+- `storm_analysis.scoring.*` (SIS weights)
+
+**Storm vs sunset precedence:** storm wins. Active sunset capture is cancelled cleanly (partial frames deleted, no half-baked video). Decided in design — see `docs/superpowers/specs/2026-05-22-storm-capture-design.md`.
+
+**Backtest mode** for threshold tuning: `python main.py weather --backtest --start YYYY-MM-DD --end YYYY-MM-DD` (works up to 92 days back per Open-Meteo free tier).
+
 ### Module map
 
 | File | Responsibility |
