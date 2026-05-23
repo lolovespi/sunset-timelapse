@@ -9,6 +9,7 @@ import sys
 import logging
 from datetime import datetime, date, timedelta
 from pathlib import Path
+from typing import Dict
 
 from config_manager import get_config
 from sunset_scheduler import SunsetScheduler
@@ -105,16 +106,25 @@ def cmd_test(args):
     """Run system tests"""
     setup_logging()
     logger = logging.getLogger(__name__)
-    
+
     logger.info("Running system tests...")
-    
-    scheduler = SunsetScheduler()
-    
-    # Run validation
-    if not scheduler.validate_system():
-        logger.error("System validation failed")
-        sys.exit(1)
-        
+
+    # These flags are standalone and don't require the full SunsetScheduler stack
+    _standalone_flags = {'weather', 'tempest', 'storm_prompt'}
+    _needs_scheduler = any(
+        getattr(args, f, False)
+        for f in ('camera', 'youtube', 'youtube_token', 'drive', 'recordings',
+                  'sunset', 'email', 'sbs', 'sbs_sample')
+    )
+
+    scheduler = None
+    if _needs_scheduler or not any(getattr(args, f, False) for f in _standalone_flags):
+        scheduler = SunsetScheduler()
+        # Run validation
+        if not scheduler.validate_system():
+            logger.error("System validation failed")
+            sys.exit(1)
+
     # Test individual components if requested
     if args.camera:
         logger.info("Testing camera connection...")
@@ -356,6 +366,65 @@ def cmd_test(args):
             logger.error(f"✗ SBS sample analysis failed: {e}")
             sys.exit(1)
             
+    if args.weather:
+        logger.info("Testing Open-Meteo connectivity...")
+        from open_meteo_client import OpenMeteoClient
+        client = OpenMeteoClient()
+        try:
+            windows = client.get_storm_watch_windows()
+            logger.info(f"✓ Open-Meteo returned {len(windows)} storm watch window(s)")
+            for w in windows[:3]:
+                logger.info(
+                    f"  {w.start} → {w.end} (confidence {w.confidence:.0%}): {', '.join(w.reasons[:3])}"
+                )
+        except Exception as e:
+            logger.error(f"✗ Open-Meteo test failed: {e}")
+            sys.exit(1)
+
+    if args.tempest:
+        logger.info("Testing Tempest UDP reception (5 seconds)...")
+        from tempest_monitor import TempestMonitor
+        import time as _time
+        monitor = TempestMonitor()
+        if not monitor.is_enabled():
+            logger.warning("✗ Tempest is disabled in configuration")
+            sys.exit(1)
+        if not monitor.start_udp_listener():
+            logger.error("✗ Could not start UDP listener (port already in use?)")
+            sys.exit(1)
+        _time.sleep(5)
+        status = monitor.get_status()
+        monitor.stop_udp_listener()
+        if status.get('observations_cached', 0) > 0 or status.get('last_message'):
+            logger.info(f"✓ Tempest UDP test passed: {status}")
+        else:
+            logger.error("✗ No messages received from Tempest in 5 seconds")
+            sys.exit(1)
+
+    if args.storm_prompt:
+        logger.info("Generating sample storm caption prompt...")
+        from facebook_uploader import FacebookUploader
+        from datetime import date as _date
+        uploader = FacebookUploader()
+        sample_metadata = {
+            'event_type': 'storm',
+            'date': _date.today().isoformat(),
+            'sis_score': 65.0, 'sis_grade': 'B',
+            'storm_metrics': {
+                'lightning_count': 8,
+                'lightning_avg_distance_km': 8.5,
+                'rain_max_mm_hr': 12.0,
+                'wind_gust_max_mph': 28.0,
+                'pressure_drop_hpa': 3.2,
+            },
+            'weather': {'temperature_f': 71, 'conditions': 'thunderstorms'},
+        }
+        prompt = uploader._build_caption_prompt(sample_metadata)
+        print("\n" + "=" * 70)
+        print(prompt)
+        print("=" * 70 + "\n")
+        logger.info("✓ Storm prompt generated")
+
     logger.info("All tests passed!")
 
 
@@ -809,6 +878,85 @@ def cmd_sbs(args):
             print("Use 'python main.py sbs --report --date YYYY-MM-DD' to generate a full report")
 
 
+def cmd_weather(args):
+    """Weather forecast utilities (currently: --backtest)."""
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
+    if not args.backtest:
+        logger.error("Use --backtest --start YYYY-MM-DD --end YYYY-MM-DD")
+        sys.exit(1)
+
+    if not args.start_date or not args.end_date:
+        logger.error("--backtest requires --start and --end")
+        sys.exit(1)
+
+    try:
+        start_date = datetime.strptime(args.start_date, '%Y-%m-%d').date()
+        end_date = datetime.strptime(args.end_date, '%Y-%m-%d').date()
+    except ValueError as e:
+        logger.error(f"Invalid date format: {e}")
+        sys.exit(1)
+
+    days = (date.today() - start_date).days
+    if days > 92:
+        logger.warning(
+            f"Start date is {days} days back; Open-Meteo free tier supports ~92 days. "
+            "Results may be truncated."
+        )
+        days = 92
+
+    from open_meteo_client import OpenMeteoClient
+    client = OpenMeteoClient()
+
+    # Pull forecast with past_days large enough to cover the range
+    data = client.fetch_forecast(past_days=days, forecast_days=1)
+
+    hourly = data.get('hourly', {})
+    times = hourly.get('time', [])
+    keys = ['cape', 'lifted_index', 'wind_direction_10m',
+            'precipitation_probability', 'weather_code', 'cloud_cover']
+
+    by_date: Dict[date, list] = {}
+    for i, t in enumerate(times):
+        try:
+            dt = datetime.fromisoformat(t)
+        except ValueError:
+            continue
+        d = dt.date()
+        if d < start_date or d > end_date:
+            continue
+        hour_data = {k: hourly[k][i] for k in keys if k in hourly}
+        qualifies, reasons = client._qualifies(hour_data)
+        if qualifies:
+            by_date.setdefault(d, []).append((dt, 0.5, reasons))
+
+    print(f"\nBacktest: {start_date} → {end_date}")
+    print("=" * 78)
+    cur = start_date
+    while cur <= end_date:
+        hours = by_date.get(cur, [])
+        if hours:
+            windows = client._merge_into_windows(hours)
+            for w in windows:
+                print(
+                    f"{cur}  WATCH {w.start.strftime('%H:%M')}-{w.end.strftime('%H:%M')}  "
+                    f"{', '.join(w.reasons[:4])}"
+                )
+        else:
+            # Find the max CAPE for context
+            max_cape = max(
+                (hourly['cape'][i] for i, t in enumerate(times)
+                 if datetime.fromisoformat(t).date() == cur
+                 and hourly.get('cape') and hourly['cape'][i] is not None),
+                default=None,
+            )
+            cape_str = f"CAPE max {max_cape:.0f}" if max_cape else "no data"
+            print(f"{cur}  no watch — {cape_str}")
+        cur += timedelta(days=1)
+    print("=" * 78)
+
+
 def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
@@ -883,6 +1031,12 @@ Examples:
                            help='Test SBS (Sunset Brilliance Score) system')
     test_parser.add_argument('--sbs-sample', action='store_true',
                            help='Test SBS analysis on recent sunset images')
+    test_parser.add_argument('--weather', action='store_true',
+                           help='Test Open-Meteo connectivity and parse response')
+    test_parser.add_argument('--tempest', action='store_true',
+                           help='Test Tempest UDP reception (5s listen)')
+    test_parser.add_argument('--storm-prompt', action='store_true',
+                           help='Generate sample storm caption prompt')
     test_parser.set_defaults(func=cmd_test)
     
     # Capture command (on-demand test capture)
@@ -953,6 +1107,16 @@ Examples:
     meteor_parser.add_argument('--stats', action='store_true',
                               help='Show meteor detection statistics')
     meteor_parser.set_defaults(func=cmd_meteor)
+
+    # Weather command (backtest forecasts)
+    weather_parser = subparsers.add_parser('weather', help='Weather forecast utilities')
+    weather_parser.add_argument('--backtest', action='store_true',
+                              help='Run storm-window logic against historical Open-Meteo data')
+    weather_parser.add_argument('--start', dest='start_date',
+                              help='Backtest start date (YYYY-MM-DD); up to 92 days back')
+    weather_parser.add_argument('--end', dest='end_date',
+                              help='Backtest end date (YYYY-MM-DD)')
+    weather_parser.set_defaults(func=cmd_weather)
 
     # Stream command (live streaming to Facebook/YouTube)
     stream_parser = subparsers.add_parser('stream', help='Live stream camera to Facebook/YouTube')
