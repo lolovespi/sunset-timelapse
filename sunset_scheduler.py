@@ -1147,12 +1147,31 @@ class SunsetScheduler:
 
         # Also schedule a backup weekly cleanup (in case daily maintenance fails)
         schedule.every().sunday.at("02:00").do(self.cleanup_old_files)
+
+        # Storm capture: poll Open-Meteo forecasts.
+        # Scheduled at the *tighter* cadence (15 min); function early-exits when
+        # outside daylight hours AND no active window (matches spec "daylight only
+        # baseline" + "15 min active window" without needing two scheduled jobs).
+        if self.config.get('open_meteo.enabled', False):
+            poll_minutes = self.config.get('open_meteo.active_window_poll_minutes', 15)
+            schedule.every(poll_minutes).minutes.do(self.update_storm_watch_windows)
+            self.logger.info(f"Open-Meteo storm watch polling scheduled every {poll_minutes} min (gated by daylight/active-window logic)")
+            # Run once at startup so first iteration has data
+            self.update_storm_watch_windows()
         
     def run_scheduler(self):
         """Run the main scheduler loop"""
         self.logger.info("Starting sunset scheduler...")
         self.running = True
-        
+
+        # Start Tempest UDP listener (callbacks gated by armed flag)
+        if self.config.get('tempest.enabled', False) and self.tempest_monitor.is_enabled():
+            started = self.tempest_monitor.start_udp_listener()
+            if started:
+                self.logger.info("Tempest UDP listener started")
+            else:
+                self.logger.warning("Tempest UDP listener failed to start — storm reactive layer disabled")
+
         # Set up initial schedule
         self.schedule_daily_capture()
         
@@ -1197,10 +1216,15 @@ class SunsetScheduler:
         self.logger.info("Scheduler stopped")
         
     def stop(self):
-        """Stop the scheduler"""
+        """Stop the scheduler gracefully"""
         self.logger.info("Stopping scheduler...")
         self.running = False
-        
+        # Stop Tempest listener if running
+        try:
+            self.tempest_monitor.stop_udp_listener()
+        except Exception as e:
+            self.logger.warning(f"Error stopping Tempest listener: {e}")
+
         # Wait for current capture to complete if running
         if self.current_capture_thread and self.current_capture_thread.is_alive():
             self.logger.info("Waiting for current capture to complete...")
