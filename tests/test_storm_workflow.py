@@ -193,3 +193,57 @@ def test_recovery_not_triggered_when_complete(tmp_path):
     expected = 720
     full = [tmp_path / f"frame_{i:04d}.jpg" for i in range(500)]
     assert wf._should_attempt_recovery(captured=full, expected_frame_count=expected) is False
+
+
+def test_complete_storm_workflow_happy_path(monkeypatch, tmp_path, storm_strikes, storm_observations):
+    """End-to-end through complete_storm_workflow with mocked I/O."""
+    from storm_workflow import StormWorkflow
+    from tempest_monitor import StormConditions
+    from datetime import datetime
+    from pathlib import Path
+    import threading
+
+    wf = StormWorkflow()
+    wf.storms_dir = tmp_path
+
+    # Mock all I/O components
+    fake_video = tmp_path / 'storm_video.mp4'
+    fake_video.touch()
+
+    monkeypatch.setattr(wf, '_capture_storm_sequence',
+                        lambda start, cancel_event=None: [tmp_path / f'f{i}.jpg' for i in range(800)])
+    monkeypatch.setattr(wf.video_processor, 'create_timelapse',
+                        lambda images, output_path, **kwargs: fake_video)
+    monkeypatch.setattr(wf.drive_uploader, 'upload_video',
+                        lambda video, target_date, metadata: {'filename': 'storm.mp4'})
+    monkeypatch.setattr(wf.facebook_uploader, 'generate_caption',
+                        lambda metadata, video_path=None: "Caption text")
+    monkeypatch.setattr(wf.facebook_uploader, 'post_sunset',
+                        lambda video_path, metadata, caption_override=None: True)
+    monkeypatch.setattr(wf.youtube_uploader, 'upload_video',
+                        lambda video_path, title, description, **kwargs: 'yt_id_123')
+    monkeypatch.setattr(wf.email_notifier, 'send_notification', lambda subject, body: None)
+
+    conditions = StormConditions(
+        storm_detected=True, confidence=0.7,
+        trigger_reasons=['Lightning: 8 strikes', 'High winds'],
+        lightning_active=True,
+    )
+
+    # Inject Tempest observations + strikes
+    monkeypatch.setattr(wf, '_collect_tempest_data',
+                        lambda monitor, window_minutes: (storm_strikes, storm_observations))
+
+    # Build a tempest_monitor stub
+    class StubMonitor:
+        pass
+
+    result = wf.complete_storm_workflow(
+        conditions=conditions,
+        start_time=datetime(2026, 5, 21, 21, 0),
+        tempest_monitor=StubMonitor(),
+    )
+
+    assert result is True
+    # Metadata file should exist
+    assert (tmp_path / '2026-05-21' / 'storm_metadata.json').exists()

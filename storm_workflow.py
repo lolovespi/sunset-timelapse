@@ -286,6 +286,217 @@ class StormWorkflow:
             json.dump(queue, f, indent=2, default=str)
         self.logger.info(f"Storm queued for deferred recovery in {queue_path}")
 
-    def complete_storm_workflow(self, *args, **kwargs):
-        """Stub — full implementation lands in Task 12."""
-        raise NotImplementedError("complete_storm_workflow lands in Task 12")
+    def _collect_tempest_data(
+        self, tempest_monitor, window_minutes: int = 90,
+    ) -> tuple:
+        """Snapshot strikes + observations from the monitor's ring buffers."""
+        cutoff = datetime.now() - timedelta(minutes=window_minutes)
+        strikes = [s for s in tempest_monitor.lightning_strikes if s.timestamp >= cutoff]
+        observations = [o for o in tempest_monitor.observations if o.timestamp >= cutoff]
+        return strikes, observations
+
+    def complete_storm_workflow(
+        self,
+        conditions,                 # StormConditions
+        start_time: datetime,
+        tempest_monitor,            # TempestMonitor instance
+        cancel_event: Optional[threading.Event] = None,
+    ) -> bool:
+        """
+        Full storm capture pipeline: capture → process → SIS → caption → post.
+
+        Returns True on overall success (some upload failures are non-fatal and
+        emit emails; only capture+process failure with no recovery returns False).
+        """
+        target_date = start_time.date()
+        self.logger.info(f"[STORM] Starting workflow for {target_date} at {start_time.time()}")
+
+        try:
+            # Step 1: Capture
+            captured = self._capture_storm_sequence(start_time, cancel_event=cancel_event)
+
+            # Step 2: Recovery if needed
+            expected = self._expected_frame_count()
+            recovered_videos: List[Path] = []
+            recovered = False
+            if self._should_attempt_recovery(captured, expected):
+                self.logger.warning(
+                    f"[STORM] Only {len(captured)}/{expected} frames captured; "
+                    "attempting immediate recovery from camera SD"
+                )
+                duration = self._compute_storm_duration_seconds()
+                end_time = start_time + timedelta(seconds=duration)
+                recovered_videos = self._attempt_immediate_recovery(
+                    target_date, start_time, end_time,
+                )
+                recovered = bool(recovered_videos)
+
+            # Step 3: Determine working video path
+            if recovered and recovered_videos:
+                video_path = recovered_videos[0]
+                source_tag = '[RECOVERED]'
+            elif captured:
+                paths = self.config.get_storage_paths()
+                video_output = paths['videos'] / f"storm_{target_date.isoformat()}.mp4"
+                video_path = self.video_processor.create_timelapse(
+                    captured, video_output,
+                )
+                if not video_path:
+                    self.logger.error("[STORM] Video processing failed")
+                    self._handle_capture_failure(
+                        target_date, start_time, conditions, tempest_monitor,
+                        reason='video_processing_failed',
+                    )
+                    return False
+                source_tag = ''
+            else:
+                # No frames and no recovery succeeded — queue deferred recovery
+                self.logger.error("[STORM] Capture and immediate recovery both failed")
+                self._handle_capture_failure(
+                    target_date, start_time, conditions, tempest_monitor,
+                    reason='capture_and_recovery_failed',
+                )
+                return False
+
+            # Step 4: Compute SIS from Tempest data
+            strikes, observations = self._collect_tempest_data(tempest_monitor, 90)
+            sis = compute_storm_intensity_score(strikes, observations)
+            self.logger.info(
+                f"[STORM] SIS {sis['score']} (Grade {sis['grade']}), "
+                f"lightning={sis['metrics']['lightning_count']}, "
+                f"gust={sis['metrics']['wind_gust_max_mph']}"
+            )
+
+            # Step 5: Build metadata for downstream consumers
+            metadata = {
+                'event_type': 'storm',
+                'date': target_date.isoformat(),
+                'capture_date': target_date.isoformat(),
+                'start_time': start_time.isoformat(),
+                'sis_score': sis['score'],
+                'sis_grade': sis['grade'],
+                'storm_metrics': sis['metrics'],
+                'storm_components': sis['components'],
+                'trigger_reasons': list(conditions.trigger_reasons),
+                'recovered': recovered,
+            }
+            self._persist_storm_metadata(target_date, metadata)
+
+            # Step 6: Drive backup
+            try:
+                drive_result = self.drive_uploader.upload_video(
+                    video_path, target_date, metadata,
+                )
+                if drive_result:
+                    self.logger.info(f"[STORM] Drive upload OK: {drive_result.get('filename')}")
+            except Exception as e:
+                self.logger.warning(f"[STORM] Drive upload failed (non-fatal): {e}")
+
+            # Step 7: Generate one caption for all socials
+            try:
+                shared_caption = self.facebook_uploader.generate_caption(
+                    metadata, video_path=str(video_path),
+                )
+                self.logger.info(f"[STORM] Caption: {shared_caption[:100]}...")
+            except Exception as e:
+                self.logger.warning(f"[STORM] Caption generation failed; using fallback: {e}")
+                shared_caption = (
+                    f"Thunderstorm timelapse from Pelham, AL on "
+                    f"{target_date.strftime('%B %d, %Y')}. "
+                    f"SIS {sis['score']:.0f}/100 (grade {sis['grade']}). "
+                    f"Camera: Reolink RLC810-WA"
+                )
+
+            # Step 8: Post to FB+IG+Reels
+            try:
+                self.facebook_uploader.post_sunset(
+                    video_path, metadata, caption_override=shared_caption,
+                )
+            except Exception as e:
+                self.logger.warning(f"[STORM] Facebook/Instagram post failed: {e}")
+                self.email_notifier.send_notification(
+                    f"{source_tag} Storm FB/IG Post Failed - {target_date}",
+                    f"Storm video {video_path} created but FB/IG post failed:\n{e}",
+                )
+
+            # Step 9: YouTube
+            try:
+                youtube_title = f"Storm {target_date.strftime('%m/%d/%y')}"
+                description = self._build_youtube_description(
+                    shared_caption, sis, metadata,
+                )
+                self.youtube_uploader.upload_video(
+                    video_path, youtube_title, description,
+                )
+            except Exception as e:
+                self.logger.warning(f"[STORM] YouTube upload failed: {e}")
+                self.email_notifier.send_notification(
+                    f"{source_tag} Storm YouTube Upload Failed - {target_date}",
+                    f"Storm video {video_path} created but YouTube upload failed:\n{e}",
+                )
+
+            # Step 10: Success email
+            subject_prefix = source_tag if source_tag else ''
+            self.email_notifier.send_notification(
+                f"{subject_prefix} Storm captured - {target_date} (SIS {sis['score']:.0f}/{sis['grade']})".strip(),
+                f"Storm timelapse captured and posted.\n\n"
+                f"SIS: {sis['score']:.0f}/100 (grade {sis['grade']})\n"
+                f"Lightning: {sis['metrics']['lightning_count']} strikes\n"
+                f"Peak gust: {sis['metrics']['wind_gust_max_mph']:.0f} mph\n"
+                f"Peak rain: {sis['metrics']['rain_max_mm_hr']:.1f} mm/hr\n"
+                f"Pressure drop: {sis['metrics']['pressure_drop_hpa']:.1f} hPa\n"
+                f"\nVideo: {video_path}",
+            )
+
+            self.logger.info(f"[STORM] Workflow completed for {target_date}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[STORM] Workflow exception: {e}", exc_info=True)
+            self.email_notifier.send_notification(
+                f"Storm Workflow Error - {start_time.date()}",
+                f"Unhandled exception in storm workflow:\n\n{str(e)}",
+            )
+            return False
+
+    def _handle_capture_failure(
+        self, target_date: date, start_time: datetime,
+        conditions, tempest_monitor, reason: str,
+    ):
+        """Queue deferred recovery + email notification."""
+        try:
+            strikes, observations = self._collect_tempest_data(tempest_monitor, 90)
+            sis = compute_storm_intensity_score(strikes, observations)
+        except Exception:
+            sis = {'score': 0.0, 'grade': 'F', 'metrics': {}, 'components': {}}
+
+        duration = self._compute_storm_duration_seconds()
+        end_time = start_time + timedelta(seconds=duration)
+        self._queue_deferred_recovery(
+            target_date, start_time, end_time, sis,
+            {'reasons': list(conditions.trigger_reasons), 'confidence': conditions.confidence},
+        )
+        self.email_notifier.send_notification(
+            f"Storm Capture Failed - {target_date}",
+            f"Storm capture failed (reason: {reason}). "
+            f"Queued for deferred recovery in morning maintenance.\n\n"
+            f"SIS estimate from Tempest data: {sis['score']:.0f}/100",
+        )
+
+    def _build_youtube_description(
+        self, caption: str, sis: Dict, metadata: Dict,
+    ) -> str:
+        """Compose YouTube description: caption + structured sensor block + hashtags."""
+        m = sis['metrics']
+        avg_dist = m.get('lightning_avg_distance_km')
+        avg_dist_str = f"{avg_dist:.1f}km" if avg_dist is not None else "n/a"
+        block = (
+            f"\n\n---\n"
+            f"Lightning: {m['lightning_count']} strikes, avg distance {avg_dist_str}\n"
+            f"Peak wind gust: {m['wind_gust_max_mph']:.0f} mph\n"
+            f"Peak rain rate: {m['rain_max_mm_hr']:.1f} mm/hr\n"
+            f"Pressure drop: {m['pressure_drop_hpa']:.1f} hPa\n"
+            f"Storm Intensity Score: {sis['score']:.0f} (Grade {sis['grade']})\n\n"
+            f"#thunderstorm #lightning #timelapse #alabama #alabamawx #weather #pelham"
+        )
+        return caption + block
