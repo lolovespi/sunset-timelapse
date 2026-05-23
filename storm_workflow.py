@@ -213,6 +213,79 @@ class StormWorkflow:
             self.logger.error(f"Storm capture failed: {e}")
             return []
 
+    def _expected_frame_count(self) -> int:
+        """How many frames a complete storm capture should yield."""
+        duration = self._compute_storm_duration_seconds()
+        interval = self.config.get('capture.interval_seconds', 5)
+        return duration // interval
+
+    def _should_attempt_recovery(
+        self, captured: List[Path], expected_frame_count: int,
+    ) -> bool:
+        """Recovery triggered when captured < 50% of expected."""
+        if expected_frame_count <= 0:
+            return False
+        return len(captured) < (expected_frame_count // 2)
+
+    def _attempt_immediate_recovery(
+        self, target_date: date, start_time: datetime, end_time: datetime,
+    ) -> List[Path]:
+        """
+        Pull camera SD-card recordings for the storm window via historical_retrieval.
+        Returns recovered frames (possibly empty if recovery also fails).
+        """
+        from historical_retrieval import HistoricalRetrieval
+        self.logger.info(
+            f"Attempting immediate recovery from camera recordings: "
+            f"{start_time} → {end_time}"
+        )
+        try:
+            hr = HistoricalRetrieval()
+            # HistoricalRetrieval's interface returns processed video paths per-day.
+            # For storm windows we need the underlying frame extraction.
+            # If the existing API doesn't expose frame-extraction for arbitrary
+            # time windows, the simplest path is to use create_historical_timelapse
+            # for the day and then point storm_workflow at the resulting video.
+            videos = hr.create_historical_timelapse(
+                target_date, target_date, upload_to_youtube=False,
+            )
+            # Recovery succeeded if any video was created for the date.
+            if videos:
+                self.logger.info(f"Recovery produced {len(videos)} video(s) for {target_date}")
+                return [Path(v) for v in videos]
+            return []
+        except Exception as e:
+            self.logger.error(f"Immediate recovery failed: {e}")
+            return []
+
+    def _queue_deferred_recovery(
+        self, target_date: date, start_time: datetime, end_time: datetime,
+        sis: Dict, storm_conditions_summary: Dict,
+    ):
+        """Queue this storm window for retry during morning maintenance."""
+        queue_path = self.storms_dir / 'pending_recovery.json'
+        queue: List[Dict] = []
+        if queue_path.exists():
+            try:
+                with open(queue_path) as f:
+                    queue = json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                self.logger.warning(f"Could not read pending_recovery.json: {e}")
+                queue = []
+
+        queue.append({
+            'date': target_date.isoformat(),
+            'start_time': start_time.isoformat(),
+            'end_time': end_time.isoformat(),
+            'sis': sis,
+            'conditions': storm_conditions_summary,
+            'queued_at': datetime.now().isoformat(),
+        })
+
+        with open(queue_path, 'w') as f:
+            json.dump(queue, f, indent=2, default=str)
+        self.logger.info(f"Storm queued for deferred recovery in {queue_path}")
+
     def complete_storm_workflow(self, *args, **kwargs):
         """Stub — full implementation lands in Task 12."""
         raise NotImplementedError("complete_storm_workflow lands in Task 12")

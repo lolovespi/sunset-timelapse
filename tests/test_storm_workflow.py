@@ -167,3 +167,29 @@ def test_capture_storm_sequence_calls_camera(monkeypatch):
     assert calls[0]['cancel_event'] is cancel_event
     duration = (calls[0]['end'] - calls[0]['start']).total_seconds()
     assert duration == wf._compute_storm_duration_seconds()
+
+
+def test_recovery_triggered_when_zero_frames():
+    """Zero captured frames → recovery should be attempted."""
+    from storm_workflow import StormWorkflow
+    wf = StormWorkflow()
+    expected = 720   # 60 min × 60s ÷ 5s
+    assert wf._should_attempt_recovery(captured=[], expected_frame_count=expected) is True
+
+
+def test_recovery_triggered_when_partial(tmp_path):
+    """< 50% frames → recovery."""
+    from storm_workflow import StormWorkflow
+    wf = StormWorkflow()
+    expected = 720
+    partial = [tmp_path / f"frame_{i:04d}.jpg" for i in range(100)]
+    assert wf._should_attempt_recovery(captured=partial, expected_frame_count=expected) is True
+
+
+def test_recovery_not_triggered_when_complete(tmp_path):
+    """>= 50% frames → no recovery needed."""
+    from storm_workflow import StormWorkflow
+    wf = StormWorkflow()
+    expected = 720
+    full = [tmp_path / f"frame_{i:04d}.jpg" for i in range(500)]
+    assert wf._should_attempt_recovery(captured=full, expected_frame_count=expected) is False
