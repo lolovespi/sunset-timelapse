@@ -547,6 +547,52 @@ class SunsetScheduler:
             self.current_capture_cancel_event = None
             self._reconcile_tempest_arming()
 
+    def _process_pending_storm_recovery(self):
+        """Retry deferred storm recoveries queued in storms/pending_recovery.json."""
+        paths = self.config.get_storage_paths()
+        queue_path = paths['base'] / 'storms' / 'pending_recovery.json'
+        if not queue_path.exists():
+            return
+
+        try:
+            with open(queue_path) as f:
+                queue = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            self.logger.warning(f"[STORM] Could not read {queue_path}: {e}")
+            return
+
+        if not queue:
+            return
+
+        self.logger.info(f"[STORM] Processing {len(queue)} pending recovery item(s)")
+        for item in queue:
+            try:
+                target_date = date.fromisoformat(item['date'])
+                start_time = datetime.fromisoformat(item['start_time'])
+                end_time = datetime.fromisoformat(item['end_time'])
+            except (KeyError, ValueError) as e:
+                self.logger.warning(f"[STORM] Skipping malformed recovery item: {e}")
+                continue
+
+            self.logger.info(f"[STORM] Deferred recovery attempt for {target_date}")
+            videos = self.storm_workflow._attempt_immediate_recovery(
+                target_date, start_time, end_time,
+            )
+            if videos:
+                self.logger.info(
+                    f"[STORM] Deferred recovery succeeded for {target_date}; "
+                    "downstream upload not auto-triggered (manual review recommended)"
+                )
+            else:
+                self.logger.warning(
+                    f"[STORM] Deferred recovery failed for {target_date}; "
+                    "dropping (spec: one retry per storm)"
+                )
+
+        # Per spec: one retry per storm. All items processed once → queue cleared.
+        with open(queue_path, 'w') as f:
+            json.dump([], f)
+
     def daily_maintenance(self, skip_historical_recovery=False):
         """
         Perform daily maintenance tasks including token refresh and file cleanup
@@ -599,6 +645,12 @@ class SunsetScheduler:
             
             # Task 5: Clean up local old files
             self.cleanup_old_files()
+
+            # Process any storms queued for deferred recovery
+            try:
+                self._process_pending_storm_recovery()
+            except Exception as e:
+                self.logger.warning(f"[STORM] Pending recovery processing failed: {e}")
 
             self.logger.info("Daily maintenance completed successfully")
 
