@@ -53,6 +53,10 @@ class SunsetScheduler:
         self.running = False
         self.current_capture_thread = None
         self.shutdown_requested = False
+
+        # Capture-state machine for storm/sunset coordination
+        self.capture_state = 'IDLE'  # IDLE | SUNSET_ACTIVE | STORM_ACTIVE
+        self.current_capture_cancel_event = None  # threading.Event when capture active
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -170,56 +174,81 @@ class SunsetScheduler:
         
     def capture_sunset_sequence(self, target_date: Optional[date] = None) -> Optional[List[Path]]:
         """
-        Capture a complete sunset sequence for the specified date
-        
+        Capture a complete sunset sequence for the specified date.
+
+        Honors self.current_capture_cancel_event for storm-interrupts-sunset.
+
         Args:
             target_date: Date to capture (default: today)
-            
+
         Returns:
-            List of captured image paths or None if failed
+            List of captured image paths or None if failed/cancelled
         """
         if target_date is None:
             target_date = date.today()
-            
+
         self.logger.info(f"Starting sunset capture sequence for {target_date}")
-        
+
+        # Per-capture cancellation event (cleared each run)
+        self.current_capture_cancel_event = threading.Event()
+        self.capture_state = 'SUNSET_ACTIVE'
+
         try:
             # Calculate capture window
             start_time, end_time = self.sunset_calc.get_capture_window(target_date)
             interval = self.config.get('capture.interval_seconds', 5)
-            
+
             # Convert timezone-aware to naive datetimes for camera interface
             if hasattr(start_time, 'tzinfo') and start_time.tzinfo is not None:
                 start_time = start_time.replace(tzinfo=None)
             if hasattr(end_time, 'tzinfo') and end_time.tzinfo is not None:
                 end_time = end_time.replace(tzinfo=None)
-            
+
             self.logger.info(f"Capture window: {start_time} to {end_time}")
-            
+
             # Capture sequence using RTSP video recording method (no ONVIF connection needed)
-            captured_images = self.camera.capture_video_sequence(start_time, end_time, interval)
-            
+            captured_images = self.camera.capture_video_sequence(
+                start_time, end_time, interval,
+                cancel_event=self.current_capture_cancel_event,
+            )
+
+            if self.current_capture_cancel_event.is_set():
+                self.logger.warning(
+                    f"Sunset capture for {target_date} cancelled by storm"
+                )
+                # Delete the partial frames so they don't get processed into a video
+                for img in (captured_images or []):
+                    try:
+                        Path(img).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                return None
+
             if captured_images:
                 self.logger.info(f"Capture sequence completed: {len(captured_images)} images")
                 return captured_images
-            else:
-                self.logger.error("No images captured")
-                # Send email notification for capture failure
-                self.email_notifier.send_capture_failure(
-                    "Camera failed to capture any images during the sunset window", 
-                    datetime.combine(target_date, datetime.min.time())
-                )
-                return None
-                
+
+            self.logger.error("No images captured")
+            # Send email notification for capture failure
+            self.email_notifier.send_capture_failure(
+                "Camera failed to capture any images during the sunset window",
+                datetime.combine(target_date, datetime.min.time())
+            )
+            return None
+
         except Exception as e:
             self.logger.error(f"Failed to capture sunset sequence: {e}")
             self.camera.disconnect()
             # Send email notification for capture exception
             self.email_notifier.send_capture_failure(
-                f"Exception during sunset capture: {str(e)}", 
+                f"Exception during sunset capture: {str(e)}",
                 datetime.combine(target_date, datetime.min.time())
             )
             return None
+        finally:
+            self.current_capture_cancel_event = None
+            if self.capture_state == 'SUNSET_ACTIVE':
+                self.capture_state = 'IDLE'
             
     def process_captured_images(self, target_date: date) -> Optional[Path]:
         """
