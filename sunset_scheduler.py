@@ -26,6 +26,9 @@ from sbs_reporter import SBSReporter
 from meteor_detector import MeteorDetector
 from tempest_api import TempestAPI
 from visual_analyzer import VisualAnalyzer
+from tempest_monitor import TempestMonitor
+from open_meteo_client import OpenMeteoClient, StormWindow
+from storm_workflow import StormWorkflow
 
 
 class SunsetScheduler:
@@ -48,6 +51,13 @@ class SunsetScheduler:
         self.meteor_detector = MeteorDetector()
         self.tempest_api = TempestAPI()
         self.visual_analyzer = VisualAnalyzer()
+
+        # Storm capture pipeline
+        self.tempest_monitor = TempestMonitor()
+        self.open_meteo_client = OpenMeteoClient()
+        self.storm_workflow = StormWorkflow()
+        self.storm_watch_windows: List[StormWindow] = []
+        self.tempest_monitor.register_storm_callback(self.on_storm_detected)
 
         # State tracking
         self.running = False
@@ -428,6 +438,115 @@ class SunsetScheduler:
             self.logger.info("Attempting fallback upload without SBS enhancements")
             return self.upload_to_youtube(video_path, target_date, actual_start_time, actual_end_time, is_test)
             
+    def update_storm_watch_windows(self):
+        """Poll Open-Meteo and reconcile storm watch window state.
+
+        Cadence-gating: when outside daylight hours AND there's no currently-active
+        watch window, skip the poll. This implements the spec's 'daylight only
+        baseline / 15 min during active' policy without needing two scheduled jobs.
+        """
+        if not self.config.get('open_meteo.enabled', False):
+            return
+
+        # Cadence gate
+        daylight = self.config.get('open_meteo.daylight_hours', [6, 22])
+        now = datetime.now()
+        in_daylight = daylight[0] <= now.hour < daylight[1]
+        in_active_window = any(w.start <= now <= w.end for w in self.storm_watch_windows)
+        if not in_daylight and not in_active_window:
+            self.logger.debug("[STORM] Skipping Open-Meteo poll (outside daylight, no active window)")
+            return
+
+        try:
+            new_windows = self.open_meteo_client.get_storm_watch_windows()
+        except Exception as e:
+            self.logger.warning(f"[STORM] Open-Meteo poll failed: {e}")
+            return
+
+        # Diff: find newly-appearing windows for notifications
+        existing = {(w.start, w.end) for w in self.storm_watch_windows}
+        new_set = {(w.start, w.end) for w in new_windows}
+        appearing = new_set - existing
+        if appearing:
+            for window in new_windows:
+                if (window.start, window.end) in appearing:
+                    msg = (
+                        f"Storm watch window forecast: "
+                        f"{window.start.strftime('%a %H:%M')} to "
+                        f"{window.end.strftime('%H:%M')}, "
+                        f"reasons: {', '.join(window.reasons[:4])}"
+                    )
+                    self.logger.info(f"[STORM] {msg}")
+                    try:
+                        self.email_notifier.send_notification(
+                            f"Storm watch window forecast — {window.start.date()}", msg,
+                        )
+                    except Exception:
+                        pass
+
+        self.storm_watch_windows = new_windows
+        self._reconcile_tempest_arming()
+
+    def _reconcile_tempest_arming(self):
+        """Arm/disarm Tempest based on whether we're inside (or near) a watch window."""
+        lead = self.config.get('open_meteo.tempest_arm_lead_minutes', 30)
+        trail = self.config.get('open_meteo.tempest_arm_trailing_minutes', 30)
+        now = datetime.now()
+
+        should_arm = any(
+            (window.start - timedelta(minutes=lead)) <= now <= (window.end + timedelta(minutes=trail))
+            for window in self.storm_watch_windows
+        )
+
+        if should_arm and not self.tempest_monitor.armed:
+            self.tempest_monitor.arm()
+        elif not should_arm and self.tempest_monitor.armed:
+            # Only disarm if no capture is in progress
+            if self.capture_state != 'STORM_ACTIVE':
+                self.tempest_monitor.disarm()
+
+    def on_storm_detected(self, conditions):
+        """
+        Storm callback fired by TempestMonitor. Aborts sunset if active,
+        runs the storm workflow.
+        """
+        if self.capture_state == 'STORM_ACTIVE':
+            self.logger.info("[STORM] Storm callback ignored — capture already STORM_ACTIVE")
+            return
+
+        # Note: tempest_monitor.armed check already happened upstream in
+        # _fire_storm_callbacks — if we got here, we're inside a watch window
+        # OR caller explicitly armed it.
+
+        if self.capture_state == 'SUNSET_ACTIVE':
+            self.logger.info("[STORM] Aborting active sunset capture")
+            if self.current_capture_cancel_event is not None:
+                self.current_capture_cancel_event.set()
+            # Wait briefly for sunset capture loop to notice the cancel
+            wait_until = datetime.now() + timedelta(seconds=10)
+            while (self.capture_state == 'SUNSET_ACTIVE'
+                   and datetime.now() < wait_until):
+                time.sleep(0.5)
+
+        self.capture_state = 'STORM_ACTIVE'
+        self.current_capture_cancel_event = threading.Event()
+
+        try:
+            success = self.storm_workflow.complete_storm_workflow(
+                conditions=conditions,
+                start_time=datetime.now(),
+                tempest_monitor=self.tempest_monitor,
+                cancel_event=self.current_capture_cancel_event,
+            )
+            if success:
+                self.logger.info("[STORM] Storm workflow completed successfully")
+            else:
+                self.logger.warning("[STORM] Storm workflow returned failure")
+        finally:
+            self.capture_state = 'IDLE'
+            self.current_capture_cancel_event = None
+            self._reconcile_tempest_arming()
+
     def daily_maintenance(self, skip_historical_recovery=False):
         """
         Perform daily maintenance tasks including token refresh and file cleanup
