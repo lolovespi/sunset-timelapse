@@ -103,3 +103,35 @@ def test_sunset_prompt_still_works():
     prompt = uploader._build_caption_prompt(metadata)
     assert 'sunset' in prompt.lower()
     assert 'SBS' in prompt or 'Brilliance' in prompt
+
+
+def test_storm_workflow_init():
+    """Workflow class instantiates and exposes required methods."""
+    from storm_workflow import StormWorkflow
+    wf = StormWorkflow()
+    assert hasattr(wf, 'complete_storm_workflow')
+    assert hasattr(wf, '_compute_storm_duration_seconds')
+
+
+def test_compute_storm_duration_uses_config():
+    """Duration = min(max_duration_hours, post_storm_minutes) by default."""
+    from storm_workflow import StormWorkflow
+    wf = StormWorkflow()
+    # Default post_storm_minutes=60, max_duration_hours=4
+    seconds = wf._compute_storm_duration_seconds()
+    assert seconds == 60 * 60   # 60 minutes
+
+
+def test_storm_metadata_path(tmp_path, monkeypatch):
+    """Storm metadata file path is generated per-date."""
+    from storm_workflow import StormWorkflow
+    from datetime import date
+
+    wf = StormWorkflow()
+    # Override storms_dir for test isolation
+    wf.storms_dir = tmp_path
+
+    target = date(2026, 5, 21)
+    path = wf._storm_metadata_path(target)
+    assert path.parent.name == '2026-05-21'
+    assert path.name == 'storm_metadata.json'

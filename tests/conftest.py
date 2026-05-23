@@ -3,6 +3,7 @@
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -23,6 +24,35 @@ def use_example_config():
     )
     yield
     config_manager.config = None
+
+
+@pytest.fixture(autouse=True, scope='session')
+def patch_heavy_components(tmp_path_factory):
+    """
+    Patch heavy component constructors so StormWorkflow (and any other class
+    that instantiates CameraInterface, VideoProcessor, etc.) can be unit-tested
+    without live credentials or network access.
+
+    Also patches get_storage_paths so tests don't create real filesystem dirs
+    at paths referencing the example-config placeholder user.
+    """
+    base = tmp_path_factory.mktemp('data')
+    fake_paths = {
+        'base': base,
+        'images': base / 'images',
+        'videos': base / 'videos',
+        'logs': base / 'logs',
+        'temp': base / 'temp',
+    }
+
+    with patch('camera_interface.CameraInterface.__init__', return_value=None), \
+         patch('video_processor.VideoProcessor.__init__', return_value=None), \
+         patch('drive_uploader.DriveUploader.__init__', return_value=None), \
+         patch('facebook_uploader.FacebookUploader.__init__', return_value=None), \
+         patch('youtube_uploader.YouTubeUploader.__init__', return_value=None), \
+         patch('email_notifier.EmailNotifier.__init__', return_value=None), \
+         patch('config_manager.ConfigManager.get_storage_paths', return_value=fake_paths):
+        yield
 
 
 @pytest.fixture

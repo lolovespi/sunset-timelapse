@@ -8,8 +8,11 @@ but with storm-specific scoring, captions, and orchestration.
 See docs/superpowers/specs/2026-05-22-storm-capture-design.md for design.
 """
 
+import json
 import logging
-from datetime import datetime, timedelta
+import threading
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from config_manager import get_config
@@ -122,3 +125,59 @@ def compute_storm_intensity_score(
             'pressure_drop_hpa': round(pressure_drop, 2),
         },
     }
+
+
+class StormWorkflow:
+    """Orchestrates storm capture: capture → process → SIS → caption → social posts.
+
+    Mirrors SunsetScheduler.complete_daily_workflow but storm-flavored.
+    Reuses (does not duplicate) camera, video processor, drive uploader, social uploaders.
+    """
+
+    def __init__(self):
+        self.config = get_config()
+        self.logger = logging.getLogger(__name__)
+
+        # Reuse the same shared components as SunsetScheduler.
+        # Lazy import avoids circular dependency at module load time.
+        from camera_interface import CameraInterface
+        from video_processor import VideoProcessor
+        from drive_uploader import DriveUploader
+        from facebook_uploader import FacebookUploader
+        from youtube_uploader import YouTubeUploader
+        from email_notifier import EmailNotifier
+
+        self.camera = CameraInterface()
+        self.video_processor = VideoProcessor()
+        self.drive_uploader = DriveUploader()
+        self.facebook_uploader = FacebookUploader()
+        self.youtube_uploader = YouTubeUploader()
+        self.email_notifier = EmailNotifier()
+
+        # Storms directory under data/storms/
+        paths = self.config.get_storage_paths()
+        self.storms_dir = paths['base'] / 'storms'
+        self.storms_dir.mkdir(parents=True, exist_ok=True)
+
+    def _compute_storm_duration_seconds(self) -> int:
+        """Capture duration: min(max_duration_hours, post_storm_minutes)."""
+        post_minutes = self.config.get('tempest.capture.post_storm_minutes', 60)
+        max_hours = self.config.get('tempest.capture.max_duration_hours', 4)
+        return int(min(max_hours * 3600, post_minutes * 60))
+
+    def _storm_metadata_path(self, target_date: date) -> Path:
+        """Where to persist storm metadata for a given date."""
+        d = self.storms_dir / target_date.isoformat()
+        d.mkdir(parents=True, exist_ok=True)
+        return d / 'storm_metadata.json'
+
+    def _persist_storm_metadata(self, target_date: date, metadata: Dict):
+        """Write storm metadata JSON (survives across restarts for deferred recovery)."""
+        path = self._storm_metadata_path(target_date)
+        with open(path, 'w') as f:
+            json.dump(metadata, f, indent=2, default=str)
+        self.logger.info(f"Storm metadata persisted to {path}")
+
+    def complete_storm_workflow(self, *args, **kwargs):
+        """Stub — full implementation lands in Task 12."""
+        raise NotImplementedError("complete_storm_workflow lands in Task 12")
