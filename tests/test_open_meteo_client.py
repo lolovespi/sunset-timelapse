@@ -121,3 +121,30 @@ def test_merge_with_gap_splits():
 def test_merge_empty_returns_empty():
     client = OpenMeteoClient()
     assert client._merge_into_windows([]) == []
+
+
+def test_get_storm_watch_windows_from_fixture(monkeypatch, openmeteo_response):
+    """May 21 should produce a watch window for evening hours."""
+    client = OpenMeteoClient()
+    # Force the fetch to return the recorded fixture
+    monkeypatch.setattr(client, 'fetch_forecast', lambda **kwargs: openmeteo_response)
+
+    windows = client.get_storm_watch_windows()
+
+    # We expect at least one window covering May 21 evening
+    may_21_windows = [w for w in windows if w.start.date() == datetime(2026, 5, 21).date()]
+    assert len(may_21_windows) >= 1
+    w = may_21_windows[0]
+    assert w.start.hour <= 17    # qualifying starts no later than 17:00
+    assert w.end.hour >= 20      # extends through at least 19:00 inclusive
+    assert any('CAPE' in r for r in w.reasons)
+
+
+@pytest.mark.integration
+def test_fetch_forecast_live():
+    """Hit the real Open-Meteo API. Marked integration to allow opt-out."""
+    client = OpenMeteoClient()
+    data = client.fetch_forecast()
+    assert 'hourly' in data
+    assert 'cape' in data['hourly']
+    assert len(data['hourly']['time']) > 24

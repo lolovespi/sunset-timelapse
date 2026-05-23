@@ -124,6 +124,85 @@ class OpenMeteoClient:
 
         return True, reasons
 
+    def fetch_forecast(
+        self,
+        past_days: int = 0,
+        forecast_days: int = 2,
+        timeout: float = 10.0,
+    ) -> Dict:
+        """
+        Fetch forecast from Open-Meteo. Returns the full JSON response.
+
+        Raises: requests.exceptions.* on network errors.
+        """
+        params = {
+            'latitude': self.latitude,
+            'longitude': self.longitude,
+            'hourly': ','.join([
+                'temperature_2m', 'precipitation_probability', 'precipitation',
+                'weather_code', 'cloud_cover', 'pressure_msl',
+                'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m',
+                'cape', 'lifted_index',
+            ]),
+            'past_days': past_days,
+            'forecast_days': forecast_days,
+            'timezone': self.timezone,
+            'temperature_unit': 'fahrenheit',
+            'wind_speed_unit': 'mph',
+            'precipitation_unit': 'inch',
+        }
+        response = requests.get(API_URL, params=params, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def get_storm_watch_windows(
+        self,
+        past_days: int = 0,
+        forecast_days: int = 2,
+    ) -> List[StormWindow]:
+        """
+        Fetch the forecast, evaluate each hour, return merged storm watch windows.
+
+        Returns empty list on fetch failure (logged warning, not raised).
+        """
+        try:
+            data = self.fetch_forecast(past_days=past_days, forecast_days=forecast_days)
+        except requests.exceptions.RequestException as e:
+            self.logger.warning(f"Open-Meteo fetch failed: {e}")
+            return []
+        except (ValueError, KeyError) as e:
+            self.logger.warning(f"Open-Meteo response malformed: {e}")
+            return []
+
+        hourly = data.get('hourly', {})
+        times = hourly.get('time', [])
+        if not times:
+            self.logger.warning("Open-Meteo response missing hourly.time")
+            return []
+
+        keys = [
+            'cape', 'lifted_index', 'wind_direction_10m',
+            'precipitation_probability', 'weather_code', 'cloud_cover',
+        ]
+        # Sanity: every key must be present (None values are OK)
+        for k in keys:
+            if k not in hourly:
+                self.logger.warning(f"Open-Meteo response missing hourly.{k}")
+                return []
+
+        qualifying = []
+        for i, time_str in enumerate(times):
+            hour_data = {k: hourly[k][i] for k in keys}
+            qualifies, reasons = self._qualifies(hour_data)
+            if qualifies:
+                # Use a simple confidence proxy: 0.4 base + 0.1 per "any_of" trigger met
+                conf = 0.4 + 0.1 * sum(1 for r in reasons if any(
+                    tag in r for tag in ('precip', 'WMO', 'cloud')))
+                hour_dt = datetime.fromisoformat(time_str)
+                qualifying.append((hour_dt, min(conf, 1.0), reasons))
+
+        return self._merge_into_windows(qualifying)
+
     def _merge_into_windows(
         self,
         qualifying: List[tuple],  # list of (datetime, confidence, reasons)
