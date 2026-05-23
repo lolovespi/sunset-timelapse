@@ -30,7 +30,7 @@ class FacebookUploader:
     GRAPH_VIDEO_URL = f"https://graph-video.facebook.com/{GRAPH_API_VERSION}"
 
     # Hashtags to append to all posts
-    HASHTAGS = "#Pelham #Alabama #SunsetTimelapse #Sunset #BirminghamAL #AlabamaSky #SunsetLovers #Timelapse #GoldenHour #NaturePhotography"
+    HASHTAGS = "#Pelham #Alabama #AlabamaWx #SunsetTimelapse #Sunset #BirminghamAL #AlabamaSky #SunsetLovers #Timelapse #GoldenHour #NaturePhotography"
 
     def __init__(self):
         """Initialize Facebook uploader"""
@@ -369,7 +369,15 @@ Caption:"""
         return f"Sunset {date_display}"
 
     def _build_caption_prompt(self, metadata: Dict[str, Any]) -> str:
-        """Build the prompt for Anthropic API"""
+        """Build the prompt for Anthropic API.
+
+        Branches on metadata['event_type']: 'sunset' (default) or 'storm'.
+        """
+        event_type = metadata.get('event_type', 'sunset')
+        if event_type == 'storm':
+            return self._build_storm_caption_prompt(metadata)
+
+        # ---- Sunset prompt (existing logic) ----
         # Extract metadata fields
         date_str = metadata.get('date', 'today')
         weather = metadata.get('weather', {})
@@ -449,6 +457,66 @@ RULES:
 Caption:"""
 
         return prompt
+
+    def _build_storm_caption_prompt(self, metadata: Dict[str, Any]) -> str:
+        """Build the prompt for storm-flavored captions."""
+        date_str = metadata.get('date', 'today')
+        try:
+            from datetime import datetime as dt
+            d = dt.fromisoformat(date_str)
+            date_display = d.strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            date_display = date_str
+
+        sm = metadata.get('storm_metrics', {})
+        lightning_count = sm.get('lightning_count', 0)
+        avg_dist = sm.get('lightning_avg_distance_km')
+        rain_max = sm.get('rain_max_mm_hr', 0.0)
+        wind_gust = sm.get('wind_gust_max_mph', 0.0)
+        pressure_drop = sm.get('pressure_drop_hpa', 0.0)
+        sis_score = metadata.get('sis_score')
+        sis_grade = metadata.get('sis_grade')
+
+        weather = metadata.get('weather', {})
+        temp = weather.get('temperature_f')
+
+        sensor_lines = []
+        if lightning_count > 0:
+            line = f"- Lightning: {lightning_count} strike(s)"
+            if avg_dist is not None:
+                line += f", avg distance {avg_dist:.1f} km"
+            sensor_lines.append(line)
+        if wind_gust > 0:
+            sensor_lines.append(f"- Peak wind gust: {wind_gust:.0f} mph")
+        if rain_max > 0:
+            sensor_lines.append(f"- Peak rain rate: {rain_max:.1f} mm/hr")
+        if pressure_drop > 0:
+            sensor_lines.append(f"- Pressure drop: {pressure_drop:.1f} hPa over the capture window")
+        if sis_score is not None:
+            sensor_lines.append(f"- Storm Intensity Score (SIS): {sis_score:.0f}/100 (grade {sis_grade or '?'})")
+        if temp is not None:
+            sensor_lines.append(f"- Temperature: {temp}°F")
+
+        sensor_block = '\n'.join(sensor_lines) if sensor_lines else '- (no sensor data available)'
+
+        return f"""Write a 2-3 sentence caption for a thunderstorm timelapse from Mont Vaughn Purvis (MVP), a home in Pelham, Alabama (Birmingham area), captured on {date_display}.
+
+Sensor data:
+{sensor_block}
+
+VOICE — direct, dry, observational. No hype, no slang, no weather-channel drama.
+
+RULES:
+- 2-3 sentences max
+- Include the date and "Pelham, AL" naturally
+- Lead with the most concrete sensor reading available (lightning count, peak gust, peak rain, or pressure drop, whichever is most striking)
+- Mention the storm's apparent direction of travel only if confident from wind data
+- Reference visual character only from the frames provided — actual cloud structure, lightning visible, sky color, rain visibility
+- End with "Camera: Reolink RLC810-WA" on its own line
+- No emojis, no hashtags
+- Do NOT use hype words or weather-channel drama phrases (e.g., words like a synonym for "amazing", "unbelievable", "untamed", the phrase "nature personified", or "tore through")
+
+Caption:"""
 
     @staticmethod
     def _sbs_score_to_grade(score: float) -> str:

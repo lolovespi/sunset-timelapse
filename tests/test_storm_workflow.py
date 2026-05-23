@@ -60,3 +60,46 @@ def test_grade_mapping():
     assert sis_score_to_grade(50) == 'C'
     assert sis_score_to_grade(25) == 'D'
     assert sis_score_to_grade(5) == 'F'
+
+
+def test_storm_prompt_contains_required_fields():
+    from facebook_uploader import FacebookUploader
+    uploader = FacebookUploader()
+    metadata = {
+        'event_type': 'storm',
+        'date': '2026-05-21',
+        'sis_score': 65.0,
+        'sis_grade': 'B',
+        'storm_metrics': {
+            'lightning_count': 8,
+            'lightning_avg_distance_km': 8.5,
+            'rain_max_mm_hr': 12.0,
+            'wind_gust_max_mph': 28.0,
+            'pressure_drop_hpa': 3.2,
+        },
+        'weather': {'temperature_f': 71, 'conditions': 'thunderstorms'},
+    }
+    prompt = uploader._build_caption_prompt(metadata)
+    assert 'thunderstorm' in prompt.lower() or 'storm' in prompt.lower()
+    assert '8' in prompt              # strike count
+    assert '28' in prompt             # peak gust
+    assert '12' in prompt             # rain rate
+    assert 'SIS' in prompt or 'intensity' in prompt.lower()
+    # Banned words from the spec
+    for banned in ('epic', 'incredible', 'wild', 'Mother Nature', 'ripped through'):
+        assert banned.lower() not in prompt.lower()
+
+
+def test_sunset_prompt_still_works():
+    """Existing sunset path must not regress."""
+    from facebook_uploader import FacebookUploader
+    uploader = FacebookUploader()
+    metadata = {
+        'date': '2026-05-21',
+        'sbs_score': 72.0,
+        'sbs_grade': 'B',
+        'weather': {'temperature_f': 72, 'conditions': 'clear'},
+    }
+    prompt = uploader._build_caption_prompt(metadata)
+    assert 'sunset' in prompt.lower()
+    assert 'SBS' in prompt or 'Brilliance' in prompt
