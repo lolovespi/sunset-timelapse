@@ -187,9 +187,11 @@ class DriveUploader:
             return None
         
         try:
-            # Generate filename
+            # Generate filename (event-type aware)
             date_str = target_date.strftime('%Y-%m-%d')
-            filename = f"sunset_{date_str}.mp4"
+            event_type = (metadata or {}).get('event_type', 'sunset')
+            prefix = 'storm' if event_type == 'storm' else 'sunset'
+            filename = f"{prefix}_{date_str}.mp4"
             
             # Prepare file metadata
             file_metadata = {
@@ -406,8 +408,10 @@ class DriveUploader:
             if metadata:
                 meta_data.update(metadata)
             
-            # Upload metadata as JSON file
-            meta_filename = f"sunset_{target_date.isoformat()}_metadata.json"
+            # Upload metadata as JSON file (event-type aware)
+            event_type = (metadata or {}).get('event_type', 'sunset')
+            prefix = 'storm' if event_type == 'storm' else 'sunset'
+            meta_filename = f"{prefix}_{target_date.isoformat()}_metadata.json"
             meta_content = json.dumps(meta_data, indent=2)
             
             file_metadata = {
@@ -442,8 +446,10 @@ class DriveUploader:
             self.logger.warning(f"Failed to create metadata file: {e}")
     
     def _generate_description(self, target_date: date, metadata: Optional[Dict]) -> str:
-        """Generate file description"""
-        description = f"Sunset timelapse captured on {target_date.strftime('%B %d, %Y')}"
+        """Generate file description (event-type aware)"""
+        event_type = (metadata or {}).get('event_type', 'sunset')
+        label = 'Storm' if event_type == 'storm' else 'Sunset'
+        description = f"{label} timelapse captured on {target_date.strftime('%B %d, %Y')}"
 
         if metadata:
             if 'sunset_start' in metadata and 'sunset_end' in metadata:

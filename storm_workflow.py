@@ -338,16 +338,17 @@ class StormWorkflow:
             elif captured:
                 paths = self.config.get_storage_paths()
                 video_output = paths['videos'] / f"storm_{target_date.isoformat()}.mp4"
-                video_path = self.video_processor.create_timelapse(
+                success = self.video_processor.create_timelapse(
                     captured, video_output,
                 )
-                if not video_path:
+                if not success:
                     self.logger.error("[STORM] Video processing failed")
                     self._handle_capture_failure(
                         target_date, start_time, conditions, tempest_monitor,
                         reason='video_processing_failed',
                     )
                     return False
+                video_path = video_output
                 source_tag = ''
             else:
                 # No frames and no recovery succeeded — queue deferred recovery

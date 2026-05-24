@@ -267,10 +267,16 @@ class FacebookUploader:
 
     def _generate_vision_caption(self, metadata: Dict[str, Any],
                                   video_path: str) -> Optional[str]:
-        """Generate a caption by showing actual sunset frames to Haiku vision."""
+        """Generate a caption by showing actual frames to Haiku vision.
+
+        Branches on metadata['event_type']: 'sunset' (default) or 'storm'.
+        """
         frames_b64 = self._extract_caption_frames(video_path)
         if not frames_b64:
             return None
+
+        if metadata.get('event_type') == 'storm':
+            return self._generate_storm_vision_caption(metadata, frames_b64)
 
         # Build the text portion of the prompt
         date_str = metadata.get('date', 'today')
@@ -353,6 +359,83 @@ Caption:"""
 
         caption = message.content[0].text.strip()
         self.logger.info(f"Generated caption (vision): {caption}")
+        return caption
+
+    def _generate_storm_vision_caption(self, metadata: Dict[str, Any],
+                                        frames_b64: list) -> Optional[str]:
+        """Generate a storm caption from frames + Tempest sensor data."""
+        date_str = metadata.get('date', 'today')
+        try:
+            from datetime import datetime as dt
+            d = dt.fromisoformat(date_str)
+            date_display = d.strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            date_display = date_str
+
+        sm = metadata.get('storm_metrics', {})
+        lightning_count = sm.get('lightning_count', 0)
+        avg_dist = sm.get('lightning_avg_distance_km')
+        rain_max = sm.get('rain_max_mm_hr', 0.0)
+        wind_gust = sm.get('wind_gust_max_mph', 0.0)
+        pressure_drop = sm.get('pressure_drop_hpa', 0.0)
+        sis_score = metadata.get('sis_score')
+        sis_grade = metadata.get('sis_grade')
+
+        sensor_lines = []
+        if lightning_count > 0:
+            line = f"- Lightning: {lightning_count} strike(s)"
+            if avg_dist is not None:
+                line += f", avg distance {avg_dist:.1f} km"
+            sensor_lines.append(line)
+        if wind_gust > 0:
+            sensor_lines.append(f"- Peak wind gust: {wind_gust:.0f} mph")
+        if rain_max > 0:
+            sensor_lines.append(f"- Peak rain rate: {rain_max:.1f} mm/hr")
+        if pressure_drop > 0:
+            sensor_lines.append(f"- Pressure drop: {pressure_drop:.1f} hPa")
+        if sis_score is not None:
+            sensor_lines.append(f"- Storm Intensity Score (SIS): {sis_score:.0f}/100 (grade {sis_grade or '?'})")
+        sensor_block = '\n'.join(sensor_lines) if sensor_lines else '- (no sensor data available)'
+
+        text_prompt = f"""You are writing a short caption for a thunderstorm timelapse from Mont Vaughn Purvis (MVP), a home in Pelham, Alabama (Birmingham area). The images show the sky at five moments across the capture window.
+
+Sensor data:
+{sensor_block}
+- Date: {date_display}
+
+VOICE — direct, dry, observational. No hype, no slang, no weather-channel drama.
+
+RULES:
+- 2-3 sentences max
+- Include the date and "Pelham, AL" naturally
+- State sensor readings and visible features. Do NOT interpret, compare, characterize, or rate the storm.
+- Reference visual character only from the frames — actual cloud structure, lightning visible, sky color, rain visibility
+- End with "Camera: Reolink RLC810-WA" on its own line
+- No emojis, no hashtags
+- Do NOT use hype words or weather-channel drama phrases
+- BANNED: words like "weak", "moderate", "intense", "typical", "below-average", "above-average", "produced typical spring convection", "reflects", "indicates", "for the Birmingham area"; ANY phrase that explains or grades the storm's significance, severity, or meteorological category
+
+Caption:"""
+
+        content = []
+        for b64 in frames_b64:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": b64,
+                },
+            })
+        content.append({"type": "text", "text": text_prompt})
+
+        message = self.anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": content}]
+        )
+        caption = message.content[0].text.strip()
+        self.logger.info(f"Generated storm caption (vision): {caption}")
         return caption
 
     def generate_youtube_title(self, metadata: Dict[str, Any]) -> str:
@@ -509,12 +592,11 @@ VOICE — direct, dry, observational. No hype, no slang, no weather-channel dram
 RULES:
 - 2-3 sentences max
 - Include the date and "Pelham, AL" naturally
-- Lead with the most concrete sensor reading available (lightning count, peak gust, peak rain, or pressure drop, whichever is most striking)
-- Mention the storm's apparent direction of travel only if confident from wind data
-- Reference visual character only from the frames provided — actual cloud structure, lightning visible, sky color, rain visibility
+- State sensor readings and visible features. Do NOT interpret, compare, characterize, or rate the storm.
 - End with "Camera: Reolink RLC810-WA" on its own line
 - No emojis, no hashtags
-- Do NOT use hype words or weather-channel drama phrases (e.g., words like a synonym for "amazing", "unbelievable", "untamed", the phrase "nature personified", or "tore through")
+- Do NOT use hype words or weather-channel drama phrases
+- BANNED: words like "weak", "moderate", "intense", "typical", "below-average", "above-average", "produced typical spring convection", "reflects", "indicates", "for the Birmingham area"; ANY phrase that explains or grades the storm's significance, severity, or meteorological category
 
 Caption:"""
 
@@ -716,7 +798,7 @@ Caption:"""
 
             # Step 3: Poll for container status
             status_url = f"{graph_url}/{container_id}"
-            for attempt in range(30):  # Wait up to 5 minutes
+            for attempt in range(60):  # Wait up to 10 minutes
                 time.sleep(10)
                 status_response = requests.get(
                     status_url,
