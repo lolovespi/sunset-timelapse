@@ -798,7 +798,7 @@ Caption:"""
 
             # Step 3: Poll for container status
             status_url = f"{graph_url}/{container_id}"
-            for attempt in range(60):  # Wait up to 10 minutes
+            for attempt in range(180):  # Wait up to 30 minutes
                 time.sleep(10)
                 status_response = requests.get(
                     status_url,
