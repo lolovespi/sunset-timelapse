@@ -796,41 +796,23 @@ Caption:"""
 
             self.logger.info("Video uploaded, waiting for Instagram to process...")
 
-            # Step 3: Poll for container status
-            status_url = f"{graph_url}/{container_id}"
-            for attempt in range(180):  # Wait up to 30 minutes
-                time.sleep(10)
-                status_response = requests.get(
-                    status_url,
-                    params={
-                        'fields': 'status_code,status',
-                        'access_token': self.page_access_token
-                    },
-                    timeout=30
-                )
-
-                if status_response.status_code == 200:
-                    status = status_response.json()
-                    status_code = status.get('status_code')
-                    self.logger.debug(f"Instagram container status: {status_code}")
-
-                    if status_code == 'FINISHED':
-                        break
-                    elif status_code == 'ERROR':
-                        self.logger.error(f"Instagram processing failed: {status}")
-                        return None
-            else:
-                self.logger.error("Instagram processing timed out")
-                return None
-
-            # Step 4: Publish the container (with retry for transient Meta errors)
+            # Step 3 + 4 combined: opportunistically attempt publish.
+            #
+            # IG's container status endpoint has been returning Authorization
+            # Error (subcode 33) for freshly-created containers since ~2026-05-23,
+            # making polling unreliable. media_publish, however, works fine —
+            # it returns a transient error when the container isn't ready and
+            # success once it is. So we try publish on a back-off schedule
+            # instead of polling status.
             publish_url = f"{graph_url}/{self.instagram_account_id}/media_publish"
-            for publish_attempt in range(3):
-                if publish_attempt > 0:
-                    # Wait between retries - Instagram container sometimes needs more settle time
-                    wait = 30 * publish_attempt
-                    self.logger.info(f"Instagram publish retry {publish_attempt}/3 after {wait}s wait...")
-                    time.sleep(wait)
+            status_url = f"{graph_url}/{container_id}"
+
+            # Wait schedule: 60s, 90s, 120s, 180s, 240s, 300s ... cumulative ~30 min
+            wait_schedule = [60, 90, 120, 180, 240, 300, 300, 300, 300, 300]
+            publish_response = None
+            for attempt, wait in enumerate(wait_schedule):
+                self.logger.info(f"Instagram publish attempt {attempt + 1}/{len(wait_schedule)} after {wait}s wait...")
+                time.sleep(wait)
 
                 publish_response = requests.post(
                     publish_url,
@@ -845,21 +827,31 @@ Caption:"""
                     media_id = publish_response.json().get('id')
                     self.logger.info(f"Successfully posted to Instagram. Media ID: {media_id}")
                     return media_id
-                else:
-                    # Check if it's the transient "unknown error" that usually resolves with retry
-                    try:
-                        err = publish_response.json().get('error', {})
-                        err_subcode = err.get('error_subcode')
-                        is_transient = err_subcode == 99 or err.get('code') == 1
-                    except (ValueError, AttributeError):
-                        is_transient = False
 
-                    self.logger.warning(f"Instagram publish attempt {publish_attempt + 1} failed: {publish_response.text}")
-                    if not is_transient:
-                        # Non-transient error, don't retry
-                        break
+                # On error, check status endpoint to see if container is in ERROR state
+                try:
+                    err_resp = publish_response.json().get('error', {})
+                    err_subcode = err_resp.get('error_subcode')
+                except (ValueError, AttributeError):
+                    err_subcode = None
+                self.logger.warning(f"Instagram publish attempt {attempt + 1} failed (subcode {err_subcode}): {publish_response.text[:200]}")
 
-            self.logger.error(f"Instagram publish failed after retries: {publish_response.text}")
+                # If status endpoint reports a real ERROR state, abort early.
+                try:
+                    s_r = requests.get(
+                        status_url,
+                        params={'fields': 'status_code,status', 'access_token': self.page_access_token},
+                        timeout=30,
+                    )
+                    if s_r.status_code == 200:
+                        sc = s_r.json().get('status_code')
+                        if sc == 'ERROR':
+                            self.logger.error(f"Instagram processing failed: {s_r.json()}")
+                            return None
+                except Exception:
+                    pass
+
+            self.logger.error(f"Instagram publish failed after all attempts: {publish_response.text if publish_response is not None else 'no response'}")
             return None
 
         except Exception as e:
