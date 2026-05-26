@@ -463,7 +463,7 @@ class SunsetScheduler:
             self.logger.warning(f"[STORM] Open-Meteo poll failed: {e}")
             return
 
-        # Diff: find newly-appearing windows for notifications
+        # Diff: log newly-appearing windows (no email — too noisy).
         existing = {(w.start, w.end) for w in self.storm_watch_windows}
         new_set = {(w.start, w.end) for w in new_windows}
         appearing = new_set - existing
@@ -477,12 +477,6 @@ class SunsetScheduler:
                         f"reasons: {', '.join(window.reasons[:4])}"
                     )
                     self.logger.info(f"[STORM] {msg}")
-                    try:
-                        self.email_notifier.send_notification(
-                            f"Storm watch window forecast — {window.start.date()}", msg,
-                        )
-                    except Exception:
-                        pass
 
         self.storm_watch_windows = new_windows
         self._reconcile_tempest_arming()
