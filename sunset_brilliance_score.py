@@ -392,10 +392,12 @@ class SunsetBrillianceScore:
             'brightness': 0.05        # Avoid over/under exposure
         }
 
-        # Normalize and score each component
-        warmth_score = np.mean(warmth_values)  # Already 0-1 range
-        colorfulness_score = np.clip(np.mean(colorfulness_values) / 80.0, 0, 1)  # Calibrated range
-        saturation_score = np.mean(saturations)  # Already 0-1 range
+        # Normalize and score each component.
+        # Use 60% peak (p90) + 40% mean so a fiery ending isn't buried
+        # by an hour of gray sky. Pure averaging punishes late-peaking sunsets.
+        warmth_score = self._peak_weighted(warmth_values)
+        colorfulness_score = np.clip(self._peak_weighted(colorfulness_values) / 80.0, 0, 1)
+        saturation_score = self._peak_weighted(saturations)
         gradient_score = np.clip(np.mean(gradients) / 50.0, 0, 1)  # Typical range 0-100
 
         # Color temperature scoring — sweet spot is golden-pink (3000-4500K),
@@ -434,6 +436,20 @@ class SunsetBrillianceScore:
         # Scale to 0-100 range for intuitive scoring
         return float(np.clip(brilliance_score * 100, 0, 100))
     
+    @staticmethod
+    def _peak_weighted(values: List[float]) -> float:
+        """Blend 60% peak (90th percentile) with 40% mean.
+
+        Pure averaging punishes sunsets that peak late — a fiery last
+        20 minutes gets buried by 80 minutes of gray.  Using p90 instead
+        of max avoids rewarding single-frame noise.
+        """
+        if not values:
+            return 0.0
+        p90 = float(np.percentile(values, 90))
+        mean = float(np.mean(values))
+        return 0.6 * p90 + 0.4 * mean
+
     def _calculate_temporal_smoothness(self, values: List[float]) -> float:
         """Calculate temporal smoothness score (0-1, higher = more consistent)"""
         if len(values) < 2:

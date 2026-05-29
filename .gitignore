@@ -13,10 +13,11 @@ BLOG_POST.md
 
 # Temporary analysis and test files
 analyze_*.py
-create_*.py  
+create_*.py
 explain_*.py
 debug_*.py
 test_*.py
+!tests/test_*.py
 calibrate_*.py
 verify_*.py
 manual_*.py

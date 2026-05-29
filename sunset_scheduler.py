@@ -26,6 +26,9 @@ from sbs_reporter import SBSReporter
 from meteor_detector import MeteorDetector
 from tempest_api import TempestAPI
 from visual_analyzer import VisualAnalyzer
+from tempest_monitor import TempestMonitor
+from open_meteo_client import OpenMeteoClient, StormWindow
+from storm_workflow import StormWorkflow
 
 
 class SunsetScheduler:
@@ -49,10 +52,21 @@ class SunsetScheduler:
         self.tempest_api = TempestAPI()
         self.visual_analyzer = VisualAnalyzer()
 
+        # Storm capture pipeline
+        self.tempest_monitor = TempestMonitor()
+        self.open_meteo_client = OpenMeteoClient()
+        self.storm_workflow = StormWorkflow()
+        self.storm_watch_windows: List[StormWindow] = []
+        self.tempest_monitor.register_storm_callback(self.on_storm_detected)
+
         # State tracking
         self.running = False
         self.current_capture_thread = None
         self.shutdown_requested = False
+
+        # Capture-state machine for storm/sunset coordination
+        self.capture_state = 'IDLE'  # IDLE | SUNSET_ACTIVE | STORM_ACTIVE
+        self.current_capture_cancel_event = None  # threading.Event when capture active
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -170,56 +184,81 @@ class SunsetScheduler:
         
     def capture_sunset_sequence(self, target_date: Optional[date] = None) -> Optional[List[Path]]:
         """
-        Capture a complete sunset sequence for the specified date
-        
+        Capture a complete sunset sequence for the specified date.
+
+        Honors self.current_capture_cancel_event for storm-interrupts-sunset.
+
         Args:
             target_date: Date to capture (default: today)
-            
+
         Returns:
-            List of captured image paths or None if failed
+            List of captured image paths or None if failed/cancelled
         """
         if target_date is None:
             target_date = date.today()
-            
+
         self.logger.info(f"Starting sunset capture sequence for {target_date}")
-        
+
+        # Per-capture cancellation event (cleared each run)
+        self.current_capture_cancel_event = threading.Event()
+        self.capture_state = 'SUNSET_ACTIVE'
+
         try:
             # Calculate capture window
             start_time, end_time = self.sunset_calc.get_capture_window(target_date)
             interval = self.config.get('capture.interval_seconds', 5)
-            
+
             # Convert timezone-aware to naive datetimes for camera interface
             if hasattr(start_time, 'tzinfo') and start_time.tzinfo is not None:
                 start_time = start_time.replace(tzinfo=None)
             if hasattr(end_time, 'tzinfo') and end_time.tzinfo is not None:
                 end_time = end_time.replace(tzinfo=None)
-            
+
             self.logger.info(f"Capture window: {start_time} to {end_time}")
-            
+
             # Capture sequence using RTSP video recording method (no ONVIF connection needed)
-            captured_images = self.camera.capture_video_sequence(start_time, end_time, interval)
-            
+            captured_images = self.camera.capture_video_sequence(
+                start_time, end_time, interval,
+                cancel_event=self.current_capture_cancel_event,
+            )
+
+            if self.current_capture_cancel_event.is_set():
+                self.logger.warning(
+                    f"Sunset capture for {target_date} cancelled by storm"
+                )
+                # Delete the partial frames so they don't get processed into a video
+                for img in (captured_images or []):
+                    try:
+                        Path(img).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                return None
+
             if captured_images:
                 self.logger.info(f"Capture sequence completed: {len(captured_images)} images")
                 return captured_images
-            else:
-                self.logger.error("No images captured")
-                # Send email notification for capture failure
-                self.email_notifier.send_capture_failure(
-                    "Camera failed to capture any images during the sunset window", 
-                    datetime.combine(target_date, datetime.min.time())
-                )
-                return None
-                
+
+            self.logger.error("No images captured")
+            # Send email notification for capture failure
+            self.email_notifier.send_capture_failure(
+                "Camera failed to capture any images during the sunset window",
+                datetime.combine(target_date, datetime.min.time())
+            )
+            return None
+
         except Exception as e:
             self.logger.error(f"Failed to capture sunset sequence: {e}")
             self.camera.disconnect()
             # Send email notification for capture exception
             self.email_notifier.send_capture_failure(
-                f"Exception during sunset capture: {str(e)}", 
+                f"Exception during sunset capture: {str(e)}",
                 datetime.combine(target_date, datetime.min.time())
             )
             return None
+        finally:
+            self.current_capture_cancel_event = None
+            if self.capture_state == 'SUNSET_ACTIVE':
+                self.capture_state = 'IDLE'
             
     def process_captured_images(self, target_date: date) -> Optional[Path]:
         """
@@ -339,6 +378,9 @@ class SunsetScheduler:
                     title_metadata['weather'] = weather_block
                 if visual_block:
                     title_metadata['visual_analysis'] = visual_block
+                if sbs_report:
+                    title_metadata['sbs_score'] = sbs_report['summary']['daily_brilliance_score']
+                    title_metadata['sbs_grade'] = sbs_report['summary']['quality_grade']
                 ai_title = self.facebook_uploader.generate_youtube_title(title_metadata)
             except Exception as e:
                 self.logger.warning(f"AI title generation failed: {e}")
@@ -396,6 +438,155 @@ class SunsetScheduler:
             self.logger.info("Attempting fallback upload without SBS enhancements")
             return self.upload_to_youtube(video_path, target_date, actual_start_time, actual_end_time, is_test)
             
+    def update_storm_watch_windows(self):
+        """Poll Open-Meteo and reconcile storm watch window state.
+
+        Cadence-gating: when outside daylight hours AND there's no currently-active
+        watch window, skip the poll. This implements the spec's 'daylight only
+        baseline / 15 min during active' policy without needing two scheduled jobs.
+        """
+        if not self.config.get('open_meteo.enabled', False):
+            return
+
+        # Cadence gate
+        daylight = self.config.get('open_meteo.daylight_hours', [6, 22])
+        now = datetime.now()
+        in_daylight = daylight[0] <= now.hour < daylight[1]
+        in_active_window = any(w.start <= now <= w.end for w in self.storm_watch_windows)
+        if not in_daylight and not in_active_window:
+            self.logger.debug("[STORM] Skipping Open-Meteo poll (outside daylight, no active window)")
+            return
+
+        try:
+            new_windows = self.open_meteo_client.get_storm_watch_windows()
+        except Exception as e:
+            self.logger.warning(f"[STORM] Open-Meteo poll failed: {e}")
+            return
+
+        # Diff: log newly-appearing windows (no email — too noisy).
+        existing = {(w.start, w.end) for w in self.storm_watch_windows}
+        new_set = {(w.start, w.end) for w in new_windows}
+        appearing = new_set - existing
+        if appearing:
+            for window in new_windows:
+                if (window.start, window.end) in appearing:
+                    msg = (
+                        f"Storm watch window forecast: "
+                        f"{window.start.strftime('%a %H:%M')} to "
+                        f"{window.end.strftime('%H:%M')}, "
+                        f"reasons: {', '.join(window.reasons[:4])}"
+                    )
+                    self.logger.info(f"[STORM] {msg}")
+
+        self.storm_watch_windows = new_windows
+        self._reconcile_tempest_arming()
+
+    def _reconcile_tempest_arming(self):
+        """Arm/disarm Tempest based on whether we're inside (or near) a watch window."""
+        lead = self.config.get('open_meteo.tempest_arm_lead_minutes', 30)
+        trail = self.config.get('open_meteo.tempest_arm_trailing_minutes', 30)
+        now = datetime.now()
+
+        should_arm = any(
+            (window.start - timedelta(minutes=lead)) <= now <= (window.end + timedelta(minutes=trail))
+            for window in self.storm_watch_windows
+        )
+
+        if should_arm and not self.tempest_monitor.armed:
+            self.tempest_monitor.arm()
+        elif not should_arm and self.tempest_monitor.armed:
+            # Only disarm if no capture is in progress
+            if self.capture_state != 'STORM_ACTIVE':
+                self.tempest_monitor.disarm()
+
+    def on_storm_detected(self, conditions):
+        """
+        Storm callback fired by TempestMonitor. Aborts sunset if active,
+        runs the storm workflow.
+        """
+        if self.capture_state == 'STORM_ACTIVE':
+            self.logger.info("[STORM] Storm callback ignored — capture already STORM_ACTIVE")
+            return
+
+        # Note: tempest_monitor.armed check already happened upstream in
+        # _fire_storm_callbacks — if we got here, we're inside a watch window
+        # OR caller explicitly armed it.
+
+        if self.capture_state == 'SUNSET_ACTIVE':
+            self.logger.info("[STORM] Aborting active sunset capture")
+            if self.current_capture_cancel_event is not None:
+                self.current_capture_cancel_event.set()
+            # Wait briefly for sunset capture loop to notice the cancel
+            wait_until = datetime.now() + timedelta(seconds=10)
+            while (self.capture_state == 'SUNSET_ACTIVE'
+                   and datetime.now() < wait_until):
+                time.sleep(0.5)
+
+        self.capture_state = 'STORM_ACTIVE'
+        self.current_capture_cancel_event = threading.Event()
+
+        try:
+            success = self.storm_workflow.complete_storm_workflow(
+                conditions=conditions,
+                start_time=datetime.now(),
+                tempest_monitor=self.tempest_monitor,
+                cancel_event=self.current_capture_cancel_event,
+            )
+            if success:
+                self.logger.info("[STORM] Storm workflow completed successfully")
+            else:
+                self.logger.warning("[STORM] Storm workflow returned failure")
+        finally:
+            self.capture_state = 'IDLE'
+            self.current_capture_cancel_event = None
+            self._reconcile_tempest_arming()
+
+    def _process_pending_storm_recovery(self):
+        """Retry deferred storm recoveries queued in storms/pending_recovery.json."""
+        paths = self.config.get_storage_paths()
+        queue_path = paths['base'] / 'storms' / 'pending_recovery.json'
+        if not queue_path.exists():
+            return
+
+        try:
+            with open(queue_path) as f:
+                queue = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            self.logger.warning(f"[STORM] Could not read {queue_path}: {e}")
+            return
+
+        if not queue:
+            return
+
+        self.logger.info(f"[STORM] Processing {len(queue)} pending recovery item(s)")
+        for item in queue:
+            try:
+                target_date = date.fromisoformat(item['date'])
+                start_time = datetime.fromisoformat(item['start_time'])
+                end_time = datetime.fromisoformat(item['end_time'])
+            except (KeyError, ValueError) as e:
+                self.logger.warning(f"[STORM] Skipping malformed recovery item: {e}")
+                continue
+
+            self.logger.info(f"[STORM] Deferred recovery attempt for {target_date}")
+            videos = self.storm_workflow._attempt_immediate_recovery(
+                target_date, start_time, end_time,
+            )
+            if videos:
+                self.logger.info(
+                    f"[STORM] Deferred recovery succeeded for {target_date}; "
+                    "downstream upload not auto-triggered (manual review recommended)"
+                )
+            else:
+                self.logger.warning(
+                    f"[STORM] Deferred recovery failed for {target_date}; "
+                    "dropping (spec: one retry per storm)"
+                )
+
+        # Per spec: one retry per storm. All items processed once → queue cleared.
+        with open(queue_path, 'w') as f:
+            json.dump([], f)
+
     def daily_maintenance(self, skip_historical_recovery=False):
         """
         Perform daily maintenance tasks including token refresh and file cleanup
@@ -448,6 +639,12 @@ class SunsetScheduler:
             
             # Task 5: Clean up local old files
             self.cleanup_old_files()
+
+            # Process any storms queued for deferred recovery
+            try:
+                self._process_pending_storm_recovery()
+            except Exception as e:
+                self.logger.warning(f"[STORM] Pending recovery processing failed: {e}")
 
             self.logger.info("Daily maintenance completed successfully")
 
@@ -591,11 +788,13 @@ class SunsetScheduler:
             from historical_retrieval import HistoricalRetrieval
             historical = HistoricalRetrieval()
 
-            # Attempt to retrieve and process historical footage
+            # Attempt to retrieve and process historical footage.
+            # Skip YouTube upload here — we'll handle it below with the same
+            # shared caption used for Facebook/Instagram.
             created_videos = historical.create_historical_timelapse(
                 yesterday,
                 yesterday,
-                upload_to_youtube=True
+                upload_to_youtube=False
             )
 
             if created_videos:
@@ -603,6 +802,18 @@ class SunsetScheduler:
 
                 video_path = created_videos[0]
                 sunset_start, sunset_end = self.sunset_calc.get_capture_window(yesterday)
+
+                # Create 12s short version for FB/IG (5x speed)
+                short_video_path = video_path.with_name(
+                    f"{video_path.stem}_short.mp4"
+                )
+                if not self.video_processor.create_short_version(
+                    video_path, short_video_path, speed_factor=5.0
+                ):
+                    self.logger.warning(
+                        "Recovery: Short video creation failed — FB/IG will use main video"
+                    )
+                    short_video_path = video_path
 
                 # Gather weather and visual data for all platforms
                 weather_block = None
@@ -653,22 +864,29 @@ class SunsetScheduler:
                             f"Error uploading recovered video to Google Drive:\n\n{str(e)}"
                         )
 
-                # Post to Facebook + Instagram with shared caption
+                # Generate ONE shared caption for all platforms
+                social_metadata = {
+                    'date': yesterday.isoformat(),
+                    'capture_date': yesterday.isoformat(),
+                }
+                if weather_block:
+                    social_metadata['weather'] = weather_block
+                if visual_block:
+                    social_metadata['visual_analysis'] = visual_block
+
+                shared_caption = None
                 try:
-                    social_metadata = {
-                        'date': yesterday.isoformat(),
-                        'capture_date': yesterday.isoformat(),
-                    }
-                    if weather_block:
-                        social_metadata['weather'] = weather_block
-                    if visual_block:
-                        social_metadata['visual_analysis'] = visual_block
-
-                    shared_caption = self.facebook_uploader.generate_caption(social_metadata)
+                    shared_caption = self.facebook_uploader.generate_caption(
+                        social_metadata, video_path=str(video_path)
+                    )
                     self.logger.info(f"Recovery: Shared caption: {shared_caption}")
+                except Exception as e:
+                    self.logger.warning(f"Recovery: Caption generation failed: {e}")
 
+                # Post to Facebook + Instagram with shared caption (use short version)
+                try:
                     fb_success = self.facebook_uploader.post_sunset(
-                        video_path, social_metadata, caption_override=shared_caption
+                        short_video_path, social_metadata, caption_override=shared_caption
                     )
                     if fb_success:
                         self.logger.info("Recovery: Posted to Facebook/Instagram")
@@ -676,6 +894,23 @@ class SunsetScheduler:
                         self.logger.warning("Recovery: Facebook/Instagram posting failed")
                 except Exception as e:
                     self.logger.warning(f"Recovery: Facebook/Instagram error: {e}")
+
+                # Upload to YouTube with the same shared caption as description
+                try:
+                    yt_success = self.upload_to_youtube_with_sbs(
+                        video_path, yesterday,
+                        actual_start_time=sunset_start,
+                        actual_end_time=sunset_end,
+                        weather_block=weather_block,
+                        visual_block=visual_block,
+                        description_override=shared_caption,
+                    )
+                    if yt_success:
+                        self.logger.info("Recovery: Uploaded to YouTube")
+                    else:
+                        self.logger.warning("Recovery: YouTube upload failed")
+                except Exception as e:
+                    self.logger.warning(f"Recovery: YouTube upload error: {e}")
 
                 self.email_notifier.send_notification(
                     f"Automatic Recovery: {yesterday}",
@@ -765,13 +1000,25 @@ class SunsetScheduler:
                 # Email notification already sent in capture_sunset_sequence
                 return False
                 
-            # Step 2: Process into video
+            # Step 2: Process into video (main 60s version)
             video_path = self.process_captured_images(target_date)
             if not video_path:
                 self.logger.error("Video processing failed, aborting workflow")
                 # Email notification already sent in process_captured_images
                 return False
-                
+
+            # Step 2.5: Create the 12s short version for FB/IG (5x speed)
+            short_video_path = video_path.with_name(
+                f"{video_path.stem}_short.mp4"
+            )
+            if not self.video_processor.create_short_version(
+                video_path, short_video_path, speed_factor=5.0
+            ):
+                self.logger.warning(
+                    "Short video creation failed — FB/IG will use main video"
+                )
+                short_video_path = video_path
+
             # Step 3: Generate SBS report and enhance video metadata
             sbs_report = self.sbs_reporter.generate_daily_report(target_date)
             if sbs_report:
@@ -860,13 +1107,15 @@ class SunsetScheduler:
             if visual_block:
                 social_metadata['visual_analysis'] = visual_block
 
-            shared_caption = self.facebook_uploader.generate_caption(social_metadata)
+            shared_caption = self.facebook_uploader.generate_caption(
+                social_metadata, video_path=str(video_path)
+            )
             self.logger.info(f"Shared caption: {shared_caption}")
 
-            # Step 4.7: Post to Facebook + Instagram
+            # Step 4.7: Post to Facebook + Instagram (use short version)
             try:
                 fb_success = self.facebook_uploader.post_sunset(
-                    video_path, social_metadata, caption_override=shared_caption
+                    short_video_path, social_metadata, caption_override=shared_caption
                 )
                 if fb_success:
                     self.logger.info("Successfully posted to Facebook")
@@ -944,12 +1193,31 @@ class SunsetScheduler:
 
         # Also schedule a backup weekly cleanup (in case daily maintenance fails)
         schedule.every().sunday.at("02:00").do(self.cleanup_old_files)
+
+        # Storm capture: poll Open-Meteo forecasts.
+        # Scheduled at the *tighter* cadence (15 min); function early-exits when
+        # outside daylight hours AND no active window (matches spec "daylight only
+        # baseline" + "15 min active window" without needing two scheduled jobs).
+        if self.config.get('open_meteo.enabled', False):
+            poll_minutes = self.config.get('open_meteo.active_window_poll_minutes', 15)
+            schedule.every(poll_minutes).minutes.do(self.update_storm_watch_windows)
+            self.logger.info(f"Open-Meteo storm watch polling scheduled every {poll_minutes} min (gated by daylight/active-window logic)")
+            # Run once at startup so first iteration has data
+            self.update_storm_watch_windows()
         
     def run_scheduler(self):
         """Run the main scheduler loop"""
         self.logger.info("Starting sunset scheduler...")
         self.running = True
-        
+
+        # Start Tempest UDP listener (callbacks gated by armed flag)
+        if self.config.get('tempest.enabled', False) and self.tempest_monitor.is_enabled():
+            started = self.tempest_monitor.start_udp_listener()
+            if started:
+                self.logger.info("Tempest UDP listener started")
+            else:
+                self.logger.warning("Tempest UDP listener failed to start — storm reactive layer disabled")
+
         # Set up initial schedule
         self.schedule_daily_capture()
         
@@ -994,10 +1262,15 @@ class SunsetScheduler:
         self.logger.info("Scheduler stopped")
         
     def stop(self):
-        """Stop the scheduler"""
+        """Stop the scheduler gracefully"""
         self.logger.info("Stopping scheduler...")
         self.running = False
-        
+        # Stop Tempest listener if running
+        try:
+            self.tempest_monitor.stop_udp_listener()
+        except Exception as e:
+            self.logger.warning(f"Error stopping Tempest listener: {e}")
+
         # Wait for current capture to complete if running
         if self.current_capture_thread and self.current_capture_thread.is_alive():
             self.logger.info("Waiting for current capture to complete...")

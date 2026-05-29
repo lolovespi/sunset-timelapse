@@ -30,7 +30,7 @@ class FacebookUploader:
     GRAPH_VIDEO_URL = f"https://graph-video.facebook.com/{GRAPH_API_VERSION}"
 
     # Hashtags to append to all posts
-    HASHTAGS = "#Pelham #Alabama #SunsetTimelapse #Sunset #BirminghamAL #AlabamaSky #SunsetLovers #Timelapse #GoldenHour #NaturePhotography"
+    HASHTAGS = "#Pelham #Alabama #AlabamaWx #SunsetTimelapse #Sunset #BirminghamAL #AlabamaSky #SunsetLovers #Timelapse #GoldenHour #NaturePhotography"
 
     def __init__(self):
         """Initialize Facebook uploader"""
@@ -107,10 +107,12 @@ class FacebookUploader:
             self.logger.error(f"Failed to save tracking database: {e}")
 
     def update_tracking_db(self, date_str: str, status: str, facebook_id: Optional[str] = None,
-                           instagram_id: Optional[str] = None):
+                           instagram_id: Optional[str] = None,
+                           facebook_reel_id: Optional[str] = None):
         """Update tracking database with posting status.
 
-        Merges with existing entry so Facebook and Instagram tracking are independent.
+        Merges with existing entry so Facebook post, Facebook Reel, and
+        Instagram tracking are independent.
         """
         db = self.load_tracking_db()
 
@@ -126,6 +128,10 @@ class FacebookUploader:
             entry['instagram_id'] = instagram_id
             entry['instagram_posted_at'] = datetime.now(timezone.utc).isoformat()
 
+        if facebook_reel_id:
+            entry['facebook_reel_id'] = facebook_reel_id
+            entry['facebook_reel_posted_at'] = datetime.now(timezone.utc).isoformat()
+
         if status == 'posted':
             entry['posted_at'] = datetime.now(timezone.utc).isoformat()
 
@@ -135,70 +141,305 @@ class FacebookUploader:
 
     def _build_fallback_caption(self, metadata: Dict[str, Any]) -> str:
         """Build a caption from metadata when AI generation is unavailable"""
-        date_str = metadata.get('capture_date', '')
+        date_str = metadata.get('capture_date', metadata.get('date', ''))
         try:
             from datetime import datetime as dt
-            d = dt.strptime(date_str, '%Y-%m-%d')
-            date_display = d.strftime('%B %d, %Y')
+            d = dt.fromisoformat(date_str) if date_str else None
+            date_display = d.strftime('%B %d, %Y') if d else 'today'
         except (ValueError, TypeError):
             date_display = date_str or 'today'
 
-        weather = metadata.get('weather')
+        weather = metadata.get('weather', {})
         parts = []
-        if weather:
-            if weather.get('conditions'):
-                parts.append(weather['conditions'])
-            if weather.get('temperature_f') is not None:
-                parts.append(f"{weather['temperature_f']}°F")
+        if weather.get('conditions') and weather['conditions'] not in ('unknown', 'Unknown'):
+            parts.append(weather['conditions'])
+        if weather.get('temperature_f') is not None:
+            parts.append(f"{weather['temperature_f']}°F")
+        if weather.get('humidity_pct') is not None:
+            parts.append(f"{weather['humidity_pct']}% humidity")
+        if weather.get('wind_speed_mph') is not None and weather['wind_speed_mph'] > 3:
+            parts.append(f"wind {weather['wind_speed_mph']} mph")
 
-        if parts:
-            caption = f"{date_display}, Pelham, AL. {', '.join(parts)}. Camera: Reolink RLC810-WA"
-        else:
-            caption = f"{date_display}, Pelham, AL. Camera: Reolink RLC810-WA"
+        sbs_score = metadata.get('sbs_score')
+        sbs_part = ""
+        if sbs_score is not None:
+            try:
+                sbs_part = f" SBS: {float(sbs_score):.0f}."
+            except (ValueError, TypeError):
+                pass
+
+        weather_str = f" {', '.join(parts)}." if parts else ""
+        caption = f"{date_display}, Pelham, AL.{weather_str}{sbs_part} Camera: Reolink RLC810-WA"
 
         return caption
 
-    def generate_caption(self, metadata: Dict[str, Any]) -> str:
+    def generate_caption(self, metadata: Dict[str, Any],
+                         video_path: Optional[str] = None) -> str:
         """
-        Generate a casual Facebook caption using Anthropic API
+        Generate a caption using Anthropic API with optional vision.
+
+        When a video_path is provided, extracts key frames and sends them
+        to Haiku vision so the AI describes what it actually sees.  Falls
+        back to text-only if frame extraction or vision call fails.
 
         Args:
-            metadata: Dictionary containing weather data, visual analysis, SBS score, etc.
+            metadata: Dictionary containing weather data, SBS score, etc.
+            video_path: Optional path to the timelapse video for vision analysis.
 
         Returns:
-            Generated caption (2-3 sentences, casual tone)
+            Generated caption (2-3 sentences)
         """
         if not self.anthropic_client:
             self.logger.error("Anthropic client not initialized. Cannot generate caption.")
             return self._build_fallback_caption(metadata)
 
-        try:
-            # Build context for the AI
-            prompt = self._build_caption_prompt(metadata)
+        # Try vision-based caption first when we have a video
+        if video_path:
+            try:
+                caption = self._generate_vision_caption(metadata, video_path)
+                if caption:
+                    return caption
+            except Exception as e:
+                self.logger.warning(f"Vision caption failed, falling back to text-only: {e}")
 
-            # Call Anthropic API
+        # Text-only fallback
+        try:
+            prompt = self._build_caption_prompt(metadata)
             message = self.anthropic_client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=150,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
+                messages=[{"role": "user", "content": prompt}]
             )
-
             caption = message.content[0].text.strip()
-            self.logger.info(f"Generated caption: {caption}")
+            self.logger.info(f"Generated caption (text-only): {caption}")
             return caption
 
         except Exception as e:
             self.logger.error(f"Failed to generate caption with Anthropic API: {e}")
             return self._build_fallback_caption(metadata)
 
-    def generate_youtube_title(self, metadata: Dict[str, Any]) -> str:
-        """
-        Generate a short AI title for YouTube (max ~70 chars).
+    def _extract_caption_frames(self, video_path: str,
+                                 positions: tuple = (0.30, 0.50, 0.62, 0.75, 0.90)
+                                 ) -> list:
+        """Extract frames at key positions from the video for vision analysis.
 
-        Always includes the date. Falls back to "Sunset MM/DD/YY" if AI fails.
+        Default positions for a 2-hour capture (60 min before/after sunset):
+          0.30 → 24 min before sunset (still bright)
+          0.50 → at sunset
+          0.62 → 14 min after (early color)
+          0.75 → 30 min after (peak color window)
+          0.90 → 48 min after (fading/blue hour)
+
+        Returns:
+            List of base64-encoded JPEG strings.
         """
+        import base64
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            self.logger.warning(f"Cannot open video for frame extraction: {video_path}")
+            return []
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < 10:
+            cap.release()
+            return []
+
+        frames_b64 = []
+        for pos in positions:
+            frame_idx = int(total_frames * pos)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            # Resize to keep token cost low (640px wide)
+            h, w = frame.shape[:2]
+            if w > 640:
+                scale = 640 / w
+                frame = cv2.resize(frame, (640, int(h * scale)))
+            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            frames_b64.append(base64.b64encode(buf).decode('utf-8'))
+
+        cap.release()
+        self.logger.info(f"Extracted {len(frames_b64)} frames for vision caption")
+        return frames_b64
+
+    def _generate_vision_caption(self, metadata: Dict[str, Any],
+                                  video_path: str) -> Optional[str]:
+        """Generate a caption by showing actual frames to Haiku vision.
+
+        Branches on metadata['event_type']: 'sunset' (default) or 'storm'.
+        """
+        frames_b64 = self._extract_caption_frames(video_path)
+        if not frames_b64:
+            return None
+
+        if metadata.get('event_type') == 'storm':
+            return self._generate_storm_vision_caption(metadata, frames_b64)
+
+        # Build the text portion of the prompt
+        date_str = metadata.get('date', 'today')
+        weather = metadata.get('weather', {})
+        sbs_score = metadata.get('sbs_score')
+        sbs_grade = metadata.get('sbs_grade')
+
+        try:
+            from datetime import datetime as dt
+            d = dt.fromisoformat(date_str)
+            date_display = d.strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            date_display = date_str
+
+        weather_parts = []
+        if weather.get('temperature_f') is not None:
+            weather_parts.append(f"{weather['temperature_f']}°F")
+        if weather.get('conditions') and weather['conditions'] not in ('unknown', 'Unknown'):
+            weather_parts.append(weather['conditions'])
+        if weather.get('humidity_pct') is not None:
+            weather_parts.append(f"{weather['humidity_pct']}% humidity")
+        if weather.get('wind_speed_mph') is not None and weather['wind_speed_mph'] > 3:
+            weather_parts.append(f"wind {weather['wind_speed_mph']} mph")
+        weather_line = ', '.join(weather_parts) if weather_parts else 'no weather data'
+
+        sbs_line = ""
+        if sbs_score is not None:
+            try:
+                s = float(sbs_score)
+                grade = sbs_grade or self._sbs_score_to_grade(s)
+                sbs_line = f"Sunset Brilliance Score: {s:.1f}/100 (grade: {grade})"
+            except (ValueError, TypeError):
+                pass
+
+        text_prompt = f"""You are writing a short caption for a sunset timelapse video from Mont Vaughn Purvis (MVP), a home in Pelham, Alabama (Birmingham area). The images show the sky at five moments across the evening — before sunset, at sunset, and three points across the hour after as the color builds and fades.
+
+Data:
+- Date: {date_display}
+- Weather at sunset: {weather_line}
+{f'- {sbs_line}' if sbs_line else ''}
+
+VOICE — write like someone who actually lives here and pays attention, not like a lifestyle brand:
+- Warm but never precious. Grounded in place. Quietly proud without being showy.
+- Observations over descriptions. Notice light, weather, stillness, or change — say it plainly.
+- Appalachian roots inform the voice: understated relationship with land and home.
+- Dry humor is welcome. Sentiment is earned, not sprinkled.
+
+RULES:
+- 1-3 sentences max
+- Include the date and "Pelham, AL" naturally
+- Include the weather (temperature, conditions) naturally
+- Include the SBS score naturally (e.g., "SBS: 72")
+- End with "Camera: Reolink RLC810-WA" on its own line
+- Do NOT reference "frames", "stills", "images", or the camera analysis process
+- Write about the sky and the evening as if you watched it happen, not as if you're analyzing photos
+- No emojis, no hashtags
+- No "golden hour", "cozy vibes", inspirational language, or lifestyle-brand phrasing
+- Do NOT use: "hit different", "still worth watching", "in their own way", "clean progression"
+
+Caption:"""
+
+        # Build multimodal content: frames + text
+        content = []
+        for i, b64 in enumerate(frames_b64):
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": b64,
+                },
+            })
+        content.append({"type": "text", "text": text_prompt})
+
+        message = self.anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": content}]
+        )
+
+        caption = message.content[0].text.strip()
+        self.logger.info(f"Generated caption (vision): {caption}")
+        return caption
+
+    def _generate_storm_vision_caption(self, metadata: Dict[str, Any],
+                                        frames_b64: list) -> Optional[str]:
+        """Generate a storm caption from frames + Tempest sensor data."""
+        date_str = metadata.get('date', 'today')
+        try:
+            from datetime import datetime as dt
+            d = dt.fromisoformat(date_str)
+            date_display = d.strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            date_display = date_str
+
+        sm = metadata.get('storm_metrics', {})
+        lightning_count = sm.get('lightning_count', 0)
+        avg_dist = sm.get('lightning_avg_distance_km')
+        rain_max = sm.get('rain_max_mm_hr', 0.0)
+        wind_gust = sm.get('wind_gust_max_mph', 0.0)
+        pressure_drop = sm.get('pressure_drop_hpa', 0.0)
+        sis_score = metadata.get('sis_score')
+        sis_grade = metadata.get('sis_grade')
+
+        sensor_lines = []
+        if lightning_count > 0:
+            line = f"- Lightning: {lightning_count} strike(s)"
+            if avg_dist is not None:
+                line += f", avg distance {avg_dist:.1f} km"
+            sensor_lines.append(line)
+        if wind_gust > 0:
+            sensor_lines.append(f"- Peak wind gust: {wind_gust:.0f} mph")
+        if rain_max > 0:
+            sensor_lines.append(f"- Peak rain rate: {rain_max:.1f} mm/hr")
+        if pressure_drop > 0:
+            sensor_lines.append(f"- Pressure drop: {pressure_drop:.1f} hPa")
+        if sis_score is not None:
+            sensor_lines.append(f"- Storm Intensity Score (SIS): {sis_score:.0f}/100 (grade {sis_grade or '?'})")
+        sensor_block = '\n'.join(sensor_lines) if sensor_lines else '- (no sensor data available)'
+
+        text_prompt = f"""You are writing a short caption for a thunderstorm timelapse from Mont Vaughn Purvis (MVP), a home in Pelham, Alabama (Birmingham area). The images show the sky at five moments across the capture window.
+
+Sensor data:
+{sensor_block}
+- Date: {date_display}
+
+VOICE — direct, dry, observational. No hype, no slang, no weather-channel drama.
+
+RULES:
+- 2-3 sentences max
+- Include the date and "Pelham, AL" naturally
+- State sensor readings and visible features. Do NOT interpret, compare, characterize, or rate the storm.
+- Reference visual character only from the frames — actual cloud structure, lightning visible, sky color, rain visibility
+- End with "Camera: Reolink RLC810-WA" on its own line
+- No emojis, no hashtags
+- Do NOT use hype words or weather-channel drama phrases
+- BANNED: words like "weak", "moderate", "intense", "typical", "below-average", "above-average", "produced typical spring convection", "reflects", "indicates", "for the Birmingham area"; ANY phrase that explains or grades the storm's significance, severity, or meteorological category
+
+Caption:"""
+
+        content = []
+        for b64 in frames_b64:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": b64,
+                },
+            })
+        content.append({"type": "text", "text": text_prompt})
+
+        message = self.anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": content}]
+        )
+        caption = message.content[0].text.strip()
+        self.logger.info(f"Generated storm caption (vision): {caption}")
+        return caption
+
+    def generate_youtube_title(self, metadata: Dict[str, Any]) -> str:
+        """Generate a standard YouTube title: 'Sunset MM/DD/YY'."""
         try:
             from datetime import datetime as dt
             date_str = metadata.get('date') or metadata.get('capture_date', '')
@@ -206,73 +447,26 @@ class FacebookUploader:
             date_display = d.strftime('%m/%d/%y')
         except (ValueError, TypeError):
             from datetime import datetime as dt
-            d = dt.now()
-            date_display = d.strftime('%m/%d/%y')
+            date_display = dt.now().strftime('%m/%d/%y')
 
-        fallback = f"Sunset {date_display}"
-
-        if not self.anthropic_client:
-            return fallback
-
-        weather = metadata.get('weather') or {}
-        visual = metadata.get('visual_analysis') or {}
-
-        prompt = f"""Write a YouTube title for a sunset timelapse video.
-
-Data:
-- Date: {date_display}
-- Sky: {weather.get('conditions', 'unknown')}, {visual.get('sunset_type', 'unknown')}, {visual.get('intensity', 'unknown')} intensity
-
-Format: "Sunset {date_display} - " followed by 2-5 words about the sky.
-Direct and plain. No hype. Vary the phrasing — don't reuse "muted" every day.
-
-Examples:
-  "Sunset {date_display} - Flat Gray, No Color"
-  "Sunset {date_display} - Clouds Broke at the Horizon"
-  "Sunset {date_display} - Clear Sky, Quick Fade"
-  "Sunset {date_display} - Low Overcast"
-  "Sunset {date_display} - Good Color Tonight"
-
-Return only the title.
-
-Title:"""
-
-        try:
-            message = self.anthropic_client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=50,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            title = message.content[0].text.strip().strip('"').strip()
-            # Enforce prefix and length
-            if not title.startswith(f"Sunset {date_display}"):
-                title = fallback
-            if len(title) > 100:
-                title = title[:97] + "..."
-            self.logger.info(f"Generated YouTube title: {title}")
-            return title
-        except Exception as e:
-            self.logger.warning(f"YouTube title generation failed: {e}")
-            return fallback
+        return f"Sunset {date_display}"
 
     def _build_caption_prompt(self, metadata: Dict[str, Any]) -> str:
-        """Build the prompt for Anthropic API"""
+        """Build the prompt for Anthropic API.
+
+        Branches on metadata['event_type']: 'sunset' (default) or 'storm'.
+        """
+        event_type = metadata.get('event_type', 'sunset')
+        if event_type == 'storm':
+            return self._build_storm_caption_prompt(metadata)
+
+        # ---- Sunset prompt (existing logic) ----
         # Extract metadata fields
         date_str = metadata.get('date', 'today')
         weather = metadata.get('weather', {})
         visual = metadata.get('visual_analysis', {})
         sbs_score = metadata.get('sbs_score')
         sbs_grade = metadata.get('sbs_grade')
-
-        # Convert date to day of week
-        try:
-            from datetime import datetime
-            date_obj = datetime.fromisoformat(date_str)
-            day_of_week = date_obj.strftime('%A')
-            season = self._get_season(date_obj.month)
-        except:
-            day_of_week = ''
-            season = ''
 
         # Format date nicely
         try:
@@ -282,57 +476,142 @@ Title:"""
         except (ValueError, TypeError):
             date_display = date_str
 
-        # Build weather summary line
+        # Build weather line with all Tempest data
         weather_parts = []
         temp = weather.get('temperature_f')
         conditions = weather.get('conditions', '')
         wind = weather.get('wind_speed_mph')
         humidity = weather.get('humidity_pct')
+        cloud_cover = weather.get('cloud_cover_pct')
         if temp is not None:
             weather_parts.append(f"{temp}°F")
         if conditions and conditions not in ('unknown', 'Unknown'):
             weather_parts.append(conditions)
+        if humidity is not None:
+            weather_parts.append(f"{humidity}% humidity")
         if wind is not None and wind > 3:
             weather_parts.append(f"wind {wind} mph")
+        if cloud_cover is not None:
+            weather_parts.append(f"{cloud_cover}% cloud cover")
         weather_line = ', '.join(weather_parts) if weather_parts else 'no weather data'
 
-        sunset_type = visual.get('sunset_type', 'unknown')
-        intensity = visual.get('intensity', 'unknown')
+        # SBS score and grade — the primary quality signal
+        sbs_line = "Sunset Brilliance Score: unknown"
+        if sbs_score is not None:
+            try:
+                s = float(sbs_score)
+                grade = sbs_grade or self._sbs_score_to_grade(s)
+                sbs_line = f"Sunset Brilliance Score: {s:.1f}/100 (grade: {grade})"
+            except (ValueError, TypeError):
+                pass
 
-        prompt = f"""Write a short social media caption for a daily sunset timelapse video from Pelham, Alabama.
+        # Dominant colors from visual analysis (objective, useful)
+        dominant_hex = self._get_dominant_colors_from_visual(visual)
+        colors_line = f"Dominant sky colors: {', '.join(dominant_hex)}" if dominant_hex else ""
 
-Data for this sunset:
+        prompt = f"""Write a short caption for a sunset timelapse video from Mont Vaughn Purvis (MVP), a home in Pelham, Alabama (Birmingham area).
+
+Data:
 - Date: {date_display}
-- Weather: {weather_line}
-- Sky: {sunset_type}, {intensity} intensity
+- Weather at sunset: {weather_line}
+- {sbs_line}
+{f'- {colors_line}' if colors_line else ''}
 
-VOICE:
-- Direct, dry, observational. No performative enthusiasm.
-- Short sentences. No filler.
-- Never apologize for an unremarkable sunset. Just describe it honestly.
-- Sound like a real person who watches sunsets regularly and knows the difference between a good one and a fine one.
+The SBS is a 0-100 score for how colorful the sunset was. Use it to calibrate
+your tone: 80+ exceptional, 70+ good, 60+ decent, 50+ ordinary, <50 flat.
+
+VOICE — write like someone who actually lives here and pays attention:
+- Warm but never precious. Grounded in place. Quietly proud without being showy.
+- Observations over descriptions. Notice light, weather, stillness, or change — say it plainly.
+- Appalachian roots: understated relationship with land and home.
+- Dry humor is welcome. Sentiment is earned, not sprinkled.
 
 RULES:
 - 1-3 sentences max
-- Describe what actually happened: sky conditions, light, temperature if notable
-- Include the date and "Pelham, AL" naturally in the text
+- Include the date and "Pelham, AL" naturally
+- Include the weather (temperature, conditions) naturally
+- Include the SBS score naturally (e.g., "SBS: 72")
 - End with "Camera: Reolink RLC810-WA" on its own line
-- Vary the structure. Don't start with "Sunset timelapse from..."
-- Do NOT claim weather events (rain, storms) unless the data explicitly confirms it
 - No emojis, no hashtags
-- Do NOT use: "hit different", "still worth watching", "in their own way", "nothing dramatic"
-- Do NOT use "muted" in every caption — use alternatives like flat, subdued, low-contrast, gray, washed out, quiet
-- Do NOT oversell an ordinary sunset
-
-Good examples:
-  "Clouds sat low over Pelham, AL tonight. {date_display}. Flat light, no color to speak of. Camera: Reolink RLC810-WA"
-  "{date_display} — partly cloudy, {temp}°F. Some orange near the horizon but it didn't last. Pelham, AL. Camera: Reolink RLC810-WA"
-  "Clear sky in Pelham tonight, {date_display}. Sun dropped fast with nothing to catch the light. Camera: Reolink RLC810-WA"
-  "Good color tonight. Clouds broke up right at sunset and the whole horizon lit up. {date_display}, Pelham, AL. Camera: Reolink RLC810-WA"
+- No "golden hour", "cozy vibes", inspirational language, or lifestyle-brand phrasing
+- Do NOT use: "hit different", "still worth watching", "in their own way", "clean progression"
+- Do NOT oversell a flat sunset or undersell a good one
 
 Caption:"""
 
         return prompt
+
+    def _build_storm_caption_prompt(self, metadata: Dict[str, Any]) -> str:
+        """Build the prompt for storm-flavored captions."""
+        date_str = metadata.get('date', 'today')
+        try:
+            from datetime import datetime as dt
+            d = dt.fromisoformat(date_str)
+            date_display = d.strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            date_display = date_str
+
+        sm = metadata.get('storm_metrics', {})
+        lightning_count = sm.get('lightning_count', 0)
+        avg_dist = sm.get('lightning_avg_distance_km')
+        rain_max = sm.get('rain_max_mm_hr', 0.0)
+        wind_gust = sm.get('wind_gust_max_mph', 0.0)
+        pressure_drop = sm.get('pressure_drop_hpa', 0.0)
+        sis_score = metadata.get('sis_score')
+        sis_grade = metadata.get('sis_grade')
+
+        weather = metadata.get('weather', {})
+        temp = weather.get('temperature_f')
+
+        sensor_lines = []
+        if lightning_count > 0:
+            line = f"- Lightning: {lightning_count} strike(s)"
+            if avg_dist is not None:
+                line += f", avg distance {avg_dist:.1f} km"
+            sensor_lines.append(line)
+        if wind_gust > 0:
+            sensor_lines.append(f"- Peak wind gust: {wind_gust:.0f} mph")
+        if rain_max > 0:
+            sensor_lines.append(f"- Peak rain rate: {rain_max:.1f} mm/hr")
+        if pressure_drop > 0:
+            sensor_lines.append(f"- Pressure drop: {pressure_drop:.1f} hPa over the capture window")
+        if sis_score is not None:
+            sensor_lines.append(f"- Storm Intensity Score (SIS): {sis_score:.0f}/100 (grade {sis_grade or '?'})")
+        if temp is not None:
+            sensor_lines.append(f"- Temperature: {temp}°F")
+
+        sensor_block = '\n'.join(sensor_lines) if sensor_lines else '- (no sensor data available)'
+
+        return f"""Write a 2-3 sentence caption for a thunderstorm timelapse from Mont Vaughn Purvis (MVP), a home in Pelham, Alabama (Birmingham area), captured on {date_display}.
+
+Sensor data:
+{sensor_block}
+
+VOICE — direct, dry, observational. No hype, no slang, no weather-channel drama.
+
+RULES:
+- 2-3 sentences max
+- Include the date and "Pelham, AL" naturally
+- State sensor readings and visible features. Do NOT interpret, compare, characterize, or rate the storm.
+- End with "Camera: Reolink RLC810-WA" on its own line
+- No emojis, no hashtags
+- Do NOT use hype words or weather-channel drama phrases
+- BANNED: words like "weak", "moderate", "intense", "typical", "below-average", "above-average", "produced typical spring convection", "reflects", "indicates", "for the Birmingham area"; ANY phrase that explains or grades the storm's significance, severity, or meteorological category
+
+Caption:"""
+
+    @staticmethod
+    def _sbs_score_to_grade(score: float) -> str:
+        """Convert numeric SBS score to letter grade."""
+        if score >= 80:
+            return "A"
+        elif score >= 70:
+            return "B"
+        elif score >= 60:
+            return "C"
+        elif score >= 50:
+            return "D"
+        return "F"
 
     def _get_season(self, month: int) -> str:
         """Get season from month"""
@@ -345,6 +624,21 @@ Caption:"""
         elif month in [9, 10, 11]:
             return "Fall"
         return ""
+
+    @staticmethod
+    def _get_dominant_colors_from_visual(visual: Dict) -> list:
+        """Extract dominant hex colors from visual analysis frames."""
+        if not visual or 'frames' not in visual:
+            return []
+        # Collect the top dominant color from each frame, deduplicate
+        colors = []
+        seen = set()
+        for frame in visual.get('frames', []):
+            for c in frame.get('dominant_colors', [])[:1]:
+                if c not in seen:
+                    colors.append(c)
+                    seen.add(c)
+        return colors[:3]
 
     def append_hashtags(self, caption: str) -> str:
         """Append hashtags to caption"""
@@ -370,55 +664,60 @@ Caption:"""
             self.logger.error(f"Video file not found: {video_path}")
             return None
 
-        try:
-            self.logger.info(f"Uploading video to Facebook: {video_path}")
+        import time
+        url = f"{self.GRAPH_VIDEO_URL}/{self.page_id}/videos"
+        last_error = None
 
-            # Facebook video upload endpoint
-            url = f"{self.GRAPH_VIDEO_URL}/{self.page_id}/videos"
+        # Retry up to 3 times for transient Meta errors (code 1 / subcode 99)
+        for attempt in range(3):
+            if attempt > 0:
+                wait = 30 * attempt
+                self.logger.info(f"Facebook upload retry {attempt}/3 after {wait}s wait...")
+                time.sleep(wait)
 
-            # Prepare the video file
-            with open(video_path, 'rb') as video_file:
-                files = {
-                    'source': video_file
-                }
-                data = {
-                    'description': caption,
-                    'access_token': self.page_access_token
-                }
+            try:
+                self.logger.info(f"Uploading video to Facebook: {video_path}")
+                with open(video_path, 'rb') as video_file:
+                    response = requests.post(
+                        url,
+                        files={'source': video_file},
+                        data={'description': caption, 'access_token': self.page_access_token},
+                        timeout=300,
+                    )
 
-                # Upload video
-                response = requests.post(url, files=files, data=data, timeout=300)
-
-            # Check response
-            if response.status_code == 200:
-                result = response.json()
-                facebook_id = result.get('id')
-
-                if facebook_id:
-                    self.logger.info(f"Successfully posted to Facebook. Post ID: {facebook_id}")
-                    self.update_tracking_db(date_str, 'posted', facebook_id)
-                    return facebook_id
-                else:
+                if response.status_code == 200:
+                    result = response.json()
+                    facebook_id = result.get('id')
+                    if facebook_id:
+                        self.logger.info(f"Successfully posted to Facebook. Post ID: {facebook_id}")
+                        self.update_tracking_db(date_str, 'posted', facebook_id)
+                        return facebook_id
                     self.logger.error(f"Facebook response missing 'id': {result}")
                     return None
-            else:
-                self.logger.error(f"Facebook upload failed. Status: {response.status_code}")
-                self.logger.error(f"Response: {response.text}")
 
-                # Send email notification
-                self.email_notifier.send_notification(
-                    f"Facebook Upload Failed - {date_str}",
-                    f"Failed to upload sunset timelapse to Facebook.\n\nStatus: {response.status_code}\n\nResponse:\n{response.text}"
-                )
-                return None
+                last_error = f"status {response.status_code}: {response.text}"
+                # Check for transient Meta errors
+                try:
+                    err = response.json().get('error', {})
+                    is_transient = err.get('error_subcode') == 99 or err.get('code') == 1
+                except (ValueError, AttributeError):
+                    is_transient = False
 
-        except Exception as e:
-            self.logger.error(f"Exception during Facebook upload: {e}")
-            self.email_notifier.send_notification(
-                f"Facebook Upload Error - {date_str}",
-                f"Exception occurred during Facebook upload:\n\n{str(e)}"
-            )
-            return None
+                self.logger.warning(f"Facebook upload attempt {attempt + 1} failed: {last_error}")
+                if not is_transient:
+                    break
+
+            except Exception as e:
+                last_error = str(e)
+                self.logger.warning(f"Facebook upload attempt {attempt + 1} exception: {e}")
+
+        # All retries exhausted
+        self.logger.error(f"Facebook upload failed after retries: {last_error}")
+        self.email_notifier.send_notification(
+            f"Facebook Upload Failed - {date_str}",
+            f"Failed to upload sunset timelapse to Facebook after 3 retries.\n\n{last_error}"
+        )
+        return None
 
     def post_to_instagram(self, video_path: str, caption: str) -> Optional[str]:
         """
@@ -497,41 +796,23 @@ Caption:"""
 
             self.logger.info("Video uploaded, waiting for Instagram to process...")
 
-            # Step 3: Poll for container status
-            status_url = f"{graph_url}/{container_id}"
-            for attempt in range(30):  # Wait up to 5 minutes
-                time.sleep(10)
-                status_response = requests.get(
-                    status_url,
-                    params={
-                        'fields': 'status_code,status',
-                        'access_token': self.page_access_token
-                    },
-                    timeout=30
-                )
-
-                if status_response.status_code == 200:
-                    status = status_response.json()
-                    status_code = status.get('status_code')
-                    self.logger.debug(f"Instagram container status: {status_code}")
-
-                    if status_code == 'FINISHED':
-                        break
-                    elif status_code == 'ERROR':
-                        self.logger.error(f"Instagram processing failed: {status}")
-                        return None
-            else:
-                self.logger.error("Instagram processing timed out")
-                return None
-
-            # Step 4: Publish the container (with retry for transient Meta errors)
+            # Step 3 + 4 combined: opportunistically attempt publish.
+            #
+            # IG's container status endpoint has been returning Authorization
+            # Error (subcode 33) for freshly-created containers since ~2026-05-23,
+            # making polling unreliable. media_publish, however, works fine —
+            # it returns a transient error when the container isn't ready and
+            # success once it is. So we try publish on a back-off schedule
+            # instead of polling status.
             publish_url = f"{graph_url}/{self.instagram_account_id}/media_publish"
-            for publish_attempt in range(3):
-                if publish_attempt > 0:
-                    # Wait between retries - Instagram container sometimes needs more settle time
-                    wait = 30 * publish_attempt
-                    self.logger.info(f"Instagram publish retry {publish_attempt}/3 after {wait}s wait...")
-                    time.sleep(wait)
+            status_url = f"{graph_url}/{container_id}"
+
+            # Wait schedule: 60s, 90s, 120s, 180s, 240s, 300s ... cumulative ~30 min
+            wait_schedule = [60, 90, 120, 180, 240, 300, 300, 300, 300, 300]
+            publish_response = None
+            for attempt, wait in enumerate(wait_schedule):
+                self.logger.info(f"Instagram publish attempt {attempt + 1}/{len(wait_schedule)} after {wait}s wait...")
+                time.sleep(wait)
 
                 publish_response = requests.post(
                     publish_url,
@@ -546,25 +827,187 @@ Caption:"""
                     media_id = publish_response.json().get('id')
                     self.logger.info(f"Successfully posted to Instagram. Media ID: {media_id}")
                     return media_id
-                else:
-                    # Check if it's the transient "unknown error" that usually resolves with retry
-                    try:
-                        err = publish_response.json().get('error', {})
-                        err_subcode = err.get('error_subcode')
-                        is_transient = err_subcode == 99 or err.get('code') == 1
-                    except (ValueError, AttributeError):
-                        is_transient = False
 
-                    self.logger.warning(f"Instagram publish attempt {publish_attempt + 1} failed: {publish_response.text}")
-                    if not is_transient:
-                        # Non-transient error, don't retry
-                        break
+                # On error, check status endpoint to see if container is in ERROR state
+                try:
+                    err_resp = publish_response.json().get('error', {})
+                    err_subcode = err_resp.get('error_subcode')
+                except (ValueError, AttributeError):
+                    err_subcode = None
+                self.logger.warning(f"Instagram publish attempt {attempt + 1} failed (subcode {err_subcode}): {publish_response.text[:200]}")
 
-            self.logger.error(f"Instagram publish failed after retries: {publish_response.text}")
+                # If status endpoint reports a real ERROR state, abort early.
+                try:
+                    s_r = requests.get(
+                        status_url,
+                        params={'fields': 'status_code,status', 'access_token': self.page_access_token},
+                        timeout=30,
+                    )
+                    if s_r.status_code == 200:
+                        sc = s_r.json().get('status_code')
+                        if sc == 'ERROR':
+                            self.logger.error(f"Instagram processing failed: {s_r.json()}")
+                            return None
+                except Exception:
+                    pass
+
+            self.logger.error(f"Instagram publish failed after all attempts: {publish_response.text if publish_response is not None else 'no response'}")
             return None
 
         except Exception as e:
             self.logger.error(f"Instagram posting error: {e}")
+            return None
+
+    def _render_portrait_for_reel(self, video_path: str) -> Optional[str]:
+        """
+        Render a 1080x1920 letterboxed portrait copy of the timelapse for
+        Facebook Reels / vertical platforms. Returns the path to the new
+        file, or None on failure. Original landscape video is unchanged.
+        """
+        import subprocess
+        src = Path(video_path)
+        if not src.exists():
+            self.logger.error(f"Source video not found: {video_path}")
+            return None
+
+        # Render alongside the original
+        out_path = src.with_name(f"{src.stem}_reel.mp4")
+        if out_path.exists() and out_path.stat().st_mtime > src.stat().st_mtime:
+            self.logger.info(f"Reel format already rendered: {out_path}")
+            return str(out_path)
+
+        # Scale landscape into a 1080x1920 canvas, black bars top/bottom
+        vf = "scale=1080:-2,pad=1080:1920:0:(1920-ih)/2:color=black"
+        cmd = [
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', str(src),
+            '-vf', vf,
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
+            str(out_path),
+        ]
+        try:
+            self.logger.info(f"Rendering portrait Reel format: {out_path.name}")
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
+            return str(out_path)
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Portrait render failed: {e.stderr or e.stdout}")
+            return None
+        except subprocess.TimeoutExpired:
+            self.logger.error("Portrait render timed out")
+            return None
+
+    def post_facebook_reel(self, video_path: str, caption: str) -> Optional[str]:
+        """
+        Post a video as a Facebook Reel using the Reels Sharing API.
+
+        Three-step flow:
+        1. Initialize upload (POST /{page_id}/video_reels?upload_phase=start)
+        2. Upload video binary to the returned upload_url
+        3. Publish (POST /{page_id}/video_reels?upload_phase=finish&video_state=PUBLISHED)
+
+        Args:
+            video_path: Path to local .mp4 file (will be rendered to portrait)
+            caption: Caption text with hashtags
+
+        Returns:
+            Facebook Reel video ID if successful, None otherwise
+        """
+        if not self.page_id or not self.page_access_token:
+            self.logger.error("Facebook credentials not configured for Reels")
+            return None
+
+        # Render portrait version (1080x1920 letterboxed)
+        reel_path = self._render_portrait_for_reel(video_path)
+        if not reel_path:
+            self.logger.error("Could not produce portrait Reel video")
+            return None
+
+        graph_url = f"https://graph.facebook.com/{self.GRAPH_API_VERSION}"
+
+        try:
+            # Step 1: Initialize upload
+            init_url = f"{graph_url}/{self.page_id}/video_reels"
+            init_resp = requests.post(
+                init_url,
+                data={'upload_phase': 'start', 'access_token': self.page_access_token},
+                timeout=60,
+            )
+            if init_resp.status_code != 200:
+                self.logger.error(f"Facebook Reel init failed [{init_resp.status_code}]: {init_resp.text}")
+                return None
+            init_data = init_resp.json()
+            video_id = init_data.get('video_id')
+            upload_url = init_data.get('upload_url')
+            if not video_id or not upload_url:
+                self.logger.error(f"Facebook Reel init missing fields: {init_data}")
+                return None
+            self.logger.info(f"Facebook Reel upload session started: video_id={video_id}")
+
+            # Step 2: Upload binary (resumable single-shot)
+            file_size = os.path.getsize(reel_path)
+            with open(reel_path, 'rb') as fh:
+                upload_resp = requests.post(
+                    upload_url,
+                    headers={
+                        'Authorization': f'OAuth {self.page_access_token}',
+                        'offset': '0',
+                        'file_size': str(file_size),
+                    },
+                    data=fh,
+                    timeout=600,
+                )
+            if upload_resp.status_code != 200:
+                self.logger.error(f"Facebook Reel upload failed [{upload_resp.status_code}]: {upload_resp.text}")
+                return None
+            self.logger.info("Facebook Reel binary uploaded, finalizing...")
+
+            # Step 3: Finalize (publish) — retry transient errors
+            import time
+            finish_url = init_url
+            last_error = None
+            for attempt in range(3):
+                if attempt > 0:
+                    wait = 30 * attempt
+                    self.logger.info(f"Facebook Reel publish retry {attempt}/3 after {wait}s...")
+                    time.sleep(wait)
+
+                finish_resp = requests.post(
+                    finish_url,
+                    data={
+                        'upload_phase': 'finish',
+                        'video_id': video_id,
+                        'video_state': 'PUBLISHED',
+                        'description': caption,
+                        'access_token': self.page_access_token,
+                    },
+                    timeout=120,
+                )
+                if finish_resp.status_code == 200:
+                    result = finish_resp.json()
+                    if result.get('success') or result.get('video_id') or video_id:
+                        self.logger.info(f"Facebook Reel published. Video ID: {video_id}")
+                        return video_id
+                    last_error = f"finish response: {finish_resp.text}"
+                else:
+                    last_error = f"status {finish_resp.status_code}: {finish_resp.text}"
+                    # Check for transient error
+                    try:
+                        err = finish_resp.json().get('error', {})
+                        is_transient = err.get('error_subcode') == 99 or err.get('code') == 1
+                    except (ValueError, AttributeError):
+                        is_transient = False
+                    if not is_transient:
+                        break
+                self.logger.warning(f"Facebook Reel publish attempt {attempt + 1} failed: {last_error}")
+
+            self.logger.error(f"Facebook Reel publish failed: {last_error}")
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Facebook Reel posting error: {e}")
             return None
 
     def validate(self) -> bool:
@@ -611,9 +1054,10 @@ Caption:"""
         entry = db.get(date_str, {})
         fb_already_posted = bool(entry.get('facebook_id'))
         ig_already_posted = bool(entry.get('instagram_id'))
+        fb_reel_already_posted = bool(entry.get('facebook_reel_id'))
 
-        if fb_already_posted and ig_already_posted:
-            self.logger.info(f"Sunset for {date_str} already posted to both Facebook and Instagram")
+        if fb_already_posted and ig_already_posted and fb_reel_already_posted:
+            self.logger.info(f"Sunset for {date_str} already posted to Facebook (post + reel) and Instagram")
             return True
 
         try:
@@ -622,16 +1066,28 @@ Caption:"""
                 caption = caption_override
             else:
                 self.logger.info("Generating caption with Anthropic API...")
-                caption = self.generate_caption(metadata)
+                caption = self.generate_caption(metadata, video_path=video_path)
             full_caption = self.append_hashtags(caption)
 
-            # Post to Facebook if not already done
+            # Post to Facebook (regular video post) if not already done
             facebook_id = None
             if fb_already_posted:
                 self.logger.info(f"Facebook post for {date_str} already exists, skipping")
                 facebook_id = entry.get('facebook_id')
             else:
                 facebook_id = self.post_video(video_path, full_caption, date_str)
+
+            # Post as Facebook Reel if not already done
+            if fb_reel_already_posted:
+                self.logger.info(f"Facebook Reel for {date_str} already exists, skipping")
+            else:
+                try:
+                    reel_id = self.post_facebook_reel(str(video_path), full_caption)
+                    if reel_id:
+                        self.logger.info(f"Facebook Reel posted: {reel_id}")
+                        self.update_tracking_db(date_str, 'posted', facebook_reel_id=reel_id)
+                except Exception as e:
+                    self.logger.warning(f"Facebook Reel posting failed (non-critical): {e}")
 
             # Post to Instagram if not already done
             if ig_already_posted:

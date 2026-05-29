@@ -112,22 +112,34 @@ class EmailNotifier:
         
         return self.send_notification(subject, body, is_html=True)
     
-    def send_upload_success(self, video_title: str, youtube_url: str, 
-                          capture_date: datetime, stats: dict) -> bool:
+    def send_upload_success(self, video_title: str, youtube_url: str,
+                          capture_date: datetime, stats: dict,
+                          event_label: Optional[str] = None) -> bool:
         """
         Send notification for successful YouTube upload
-        
+
         Args:
             video_title: Title of uploaded video
             youtube_url: YouTube video URL
-            capture_date: Date of the sunset capture
+            capture_date: Date of the capture
             stats: Dictionary with capture statistics
-            
+            event_label: Optional event label (e.g. 'Storm'). Defaults to
+                derived label: 'Storm' if video_title starts with 'Storm',
+                else 'Sunset'.
+
         Returns:
             True if notification sent successfully
         """
-        subject = f"✅ Sunset Timelapse Uploaded - {capture_date.strftime('%Y-%m-%d')}"
-        
+        if event_label is None:
+            event_label = 'Storm' if str(video_title).strip().lower().startswith('storm') else 'Sunset'
+        flair = '⛈️' if event_label == 'Storm' else '🌅'
+        flair_line = (
+            "Another storm captured and shared!" if event_label == 'Storm'
+            else "Another beautiful sunset captured and shared!"
+        )
+
+        subject = f"✅ {event_label} Timelapse Uploaded - {capture_date.strftime('%Y-%m-%d')}"
+
         # Format statistics
         stats_html = ""
         if stats:
@@ -135,22 +147,22 @@ class EmailNotifier:
             for key, value in stats.items():
                 stats_html += f"<li><strong>{key}:</strong> {value}</li>"
             stats_html += "</ul>"
-        
+
         body = f"""
-        <h2>Sunset Timelapse Successfully Uploaded</h2>
+        <h2>{event_label} Timelapse Successfully Uploaded</h2>
         <p><strong>Date:</strong> {capture_date.strftime('%Y-%m-%d')}</p>
         <p><strong>Upload Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         <p><strong>Video Title:</strong> {video_title}</p>
         <p><strong>YouTube URL:</strong> <a href="{youtube_url}">{youtube_url}</a></p>
-        
+
         {stats_html}
-        
-        <p>🌅 Another beautiful sunset captured and shared!</p>
-        
+
+        <p>{flair} {flair_line}</p>
+
         <hr>
         <p><small>Sent from Sunset Timelapse System</small></p>
         """
-        
+
         return self.send_notification(subject, body, is_html=True)
     
     def send_processing_failure(self, error_message: str, capture_date: datetime, 

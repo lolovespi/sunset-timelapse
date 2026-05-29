@@ -135,30 +135,49 @@ class VideoProcessor:
         
         return analysis
         
-    def prepare_image_list(self, image_paths: List[Path], output_dir: Path) -> Optional[Path]:
+    def prepare_image_list(self, image_paths: List[Path], output_dir: Path,
+                          fps: Optional[int] = None) -> Optional[Path]:
         """
-        Create a text file listing images for ffmpeg
-        
+        Create a text file listing images for ffmpeg with explicit duration
+        per frame. Without `duration` directives, the concat demuxer uses a
+        default 25 fps source rate, which makes the output `r` option only
+        change resampling — not actual video length. Per-frame durations
+        force each image to be displayed for exactly 1/fps seconds.
+
         Args:
             image_paths: List of image paths in order
             output_dir: Directory to save the list file
-            
+            fps: Target frame rate. If provided, each image gets a duration
+                of 1/fps seconds. Falls back to self.fps when omitted.
+
         Returns:
             Path to the image list file or None if failed
         """
         try:
             list_file = output_dir / 'image_list.txt'
-            
+            effective_fps = fps if fps else self.fps
+            per_frame_seconds = 1.0 / float(effective_fps)
+
+            sorted_paths = sorted([p for p in image_paths if p.exists()],
+                                  key=lambda x: x.name)
+
             with open(list_file, 'w') as f:
-                for img_path in sorted(image_paths):
-                    if img_path.exists():
-                        # Use absolute path and escape special characters
-                        escaped_path = str(img_path.absolute()).replace("'", "'\\''")
-                        f.write(f"file '{escaped_path}'\n")
-                        
-            self.logger.debug(f"Created image list file with {len(image_paths)} entries")
+                for img_path in sorted_paths:
+                    escaped_path = str(img_path.absolute()).replace("'", "'\\''")
+                    f.write(f"file '{escaped_path}'\n")
+                    f.write(f"duration {per_frame_seconds:.6f}\n")
+                # The concat demuxer requires the last file to be listed
+                # again without a duration so it knows where to end.
+                if sorted_paths:
+                    escaped_last = str(sorted_paths[-1].absolute()).replace("'", "'\\''")
+                    f.write(f"file '{escaped_last}'\n")
+
+            self.logger.debug(
+                f"Created image list with {len(sorted_paths)} entries at "
+                f"{effective_fps} fps ({per_frame_seconds:.4f}s per frame)"
+            )
             return list_file
-            
+
         except Exception as e:
             self.logger.error(f"Failed to create image list file: {e}")
             return None
@@ -200,7 +219,7 @@ class VideoProcessor:
             
             # Create temporary image list file
             temp_dir = self.config.get_storage_paths()['temp']
-            list_file = self.prepare_image_list(sorted_images, temp_dir)
+            list_file = self.prepare_image_list(sorted_images, temp_dir, fps=fps)
             
             if not list_file:
                 return False
@@ -270,7 +289,68 @@ class VideoProcessor:
             self.logger.error(f"Failed to create timelapse: {e}")
             return False
             
-    def create_timelapse_from_directory(self, image_directory: Path, 
+    def create_short_version(self, source_video: Path, output_path: Path,
+                            speed_factor: float = 5.0) -> bool:
+        """
+        Create a sped-up copy of an existing timelapse video.
+
+        Uses ffmpeg's setpts filter to compress the timeline without
+        dropping frames — every frame from the source ends up in the
+        output, just shown faster. Suitable for short-form social
+        platforms (Reels, Stories) where the full-length real-time
+        timelapse is too long.
+
+        Args:
+            source_video: Existing timelapse to speed up
+            output_path: Path for the short version
+            speed_factor: How much faster to play (5.0 means 5x speed,
+                          turns a 60s video into 12s)
+
+        Returns:
+            True if the short video was created.
+        """
+        import subprocess
+
+        if not source_video.exists():
+            self.logger.error(f"Source video not found: {source_video}")
+            return False
+
+        if speed_factor <= 1.0:
+            self.logger.error(f"speed_factor must be > 1.0, got {speed_factor}")
+            return False
+
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                '-i', str(source_video),
+                '-filter:v', f'setpts=PTS/{speed_factor}',
+                '-c:v', self.codec, '-preset', 'veryfast', '-crf', '22',
+                '-pix_fmt', 'yuv420p',
+                '-an',
+                '-movflags', '+faststart',
+                str(output_path),
+            ]
+            self.logger.info(
+                f"Creating short version of {source_video.name} at {speed_factor}x speed"
+            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                self.logger.error(f"Short version ffmpeg failed: {result.stderr}")
+                return False
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                self.logger.error("Short version output file missing or empty")
+                return False
+            self.logger.info(f"Short version created: {output_path}")
+            return True
+        except subprocess.TimeoutExpired:
+            self.logger.error("Short version ffmpeg timed out")
+            return False
+        except Exception as e:
+            self.logger.error(f"Short version creation failed: {e}")
+            return False
+
+    def create_timelapse_from_directory(self, image_directory: Path,
                                       output_path: Path,
                                       pattern: str = "*.jpg") -> bool:
         """

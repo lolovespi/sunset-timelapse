@@ -26,7 +26,9 @@ class VisualAnalyzer:
         "dramatic/stormy":  {"hue_range": (0, 180),  "sat_max": 50,  "val_max": 100},
     }
 
-    SAMPLE_POSITIONS = (0.25, 0.50, 0.75)
+    # Sample more positions to better catch peak sunset color (which can
+    # land anywhere in the capture window, not always the middle).
+    SAMPLE_POSITIONS = (0.35, 0.45, 0.55, 0.65, 0.75, 0.85)
 
     def __init__(self):
         self.config = get_config()
@@ -36,8 +38,9 @@ class VisualAnalyzer:
         """
         Analyze a sunset timelapse video.
 
-        Extracts frames at 25%, 50%, and 75% through the video, analyzes
-        sky region of each frame, and returns a visual analysis block.
+        Extracts frames at several positions through the video (see
+        SAMPLE_POSITIONS), analyzes the sky region of each, and returns a
+        visual analysis block.
 
         Args:
             video_path: Path to the MP4 file.
@@ -83,7 +86,7 @@ class VisualAnalyzer:
     def _extract_frames(
         self, video_path: Path
     ) -> List[Tuple[float, np.ndarray]]:
-        """Extract frames at 25%, 50%, 75% of video duration."""
+        """Extract frames at the SAMPLE_POSITIONS fractions of video duration."""
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             self.logger.error(f"Cannot open video: {video_path}")
@@ -231,10 +234,10 @@ class VisualAnalyzer:
         """
         Classify the sunset type from aggregated frame data.
 
-        Selects the most vivid of the sampled frames (the peak of color often
-        falls at 25% or 75%, not the middle) and uses brightness-weighted /
-        percentile saturation so a bright horizon band isn't washed out by
-        the larger area of dim upper sky.
+        Selects the most vivid of the sampled frames (peak sunset color can
+        occur anywhere in the capture window, not just the middle) and uses
+        brightness-weighted / percentile saturation so a bright horizon band
+        isn't washed out by the larger area of dim upper sky.
         """
         if not frame_analyses:
             return "muted/overcast"
