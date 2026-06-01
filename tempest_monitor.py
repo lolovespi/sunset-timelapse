@@ -155,19 +155,33 @@ class TempestMonitor:
             self.logger.info("TempestMonitor disarmed — storm callbacks suppressed")
         self.armed = False
 
-    def _fire_storm_callbacks(self, conditions):
-        """Fire all registered storm callbacks IF armed. Centralized for testability."""
-        if not self.armed:
+    def _fire_storm_callbacks(self, conditions) -> bool:
+        """Fire all registered storm callbacks if armed OR if live lightning is
+        confirmed.
+
+        Confirmed nearby lightning overrides the forecast-driven arming gate so a
+        real storm is captured even before (or without) a forecast watch window.
+        See docs/superpowers/specs/2026-06-01-storm-lightning-auto-arm-design.md.
+
+        Returns True if callbacks were actually invoked, False if suppressed.
+        """
+        if not self.armed and not conditions.lightning_active:
             self.logger.debug(
                 f"Storm conditions met (confidence {conditions.confidence:.1%}) "
-                "but TempestMonitor is disarmed — callbacks suppressed"
+                "but TempestMonitor is disarmed and no lightning — callbacks suppressed"
             )
-            return
+            return False
+        if not self.armed and conditions.lightning_active:
+            self.logger.info(
+                "Lightning override — confirmed nearby lightning; firing storm "
+                "callbacks despite disarmed forecast state"
+            )
         for callback in self.storm_callbacks:
             try:
                 callback(conditions)
             except Exception as e:
                 self.logger.error(f"Error in storm callback {callback.__name__}: {e}")
+        return True
 
     def start_udp_listener(self):
         """Start UDP listener in background thread"""
@@ -518,10 +532,12 @@ class TempestMonitor:
                     f"({vis_reason})"
                 )
 
-                # Call registered callbacks
-                self._fire_storm_callbacks(conditions)
-
-                self.last_storm_capture_time = now
+                # Call registered callbacks. Only start the cooldown when a
+                # capture actually fires — a suppressed detection must not
+                # consume the cooldown (root cause of the 2026-06-01 miss).
+                fired = self._fire_storm_callbacks(conditions)
+                if fired:
+                    self.last_storm_capture_time = now
         else:
             # Clear storm flag if conditions improve
             if self.storm_active:
