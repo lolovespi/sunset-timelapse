@@ -508,9 +508,10 @@ class SunsetScheduler:
             self.logger.info("[STORM] Storm callback ignored — capture already STORM_ACTIVE")
             return
 
-        # Note: tempest_monitor.armed check already happened upstream in
-        # _fire_storm_callbacks — if we got here, we're inside a watch window
-        # OR caller explicitly armed it.
+        # Note: the arming check already happened upstream in
+        # _fire_storm_callbacks — if we got here we're either inside a forecast
+        # watch window, explicitly armed, OR confirmed nearby lightning fired
+        # the lightning-override path (capture independent of the forecast window).
 
         if self.capture_state == 'SUNSET_ACTIVE':
             self.logger.info("[STORM] Aborting active sunset capture")
