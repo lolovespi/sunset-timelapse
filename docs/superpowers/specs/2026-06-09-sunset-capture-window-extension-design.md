@@ -5,15 +5,11 @@
 
 ## Problem
 
-The Pi's daily capture cuts off 30 minutes after sunset
-(`config-pi.yaml: capture.time_after_sunset_minutes: 30`). Civil twilight in
+The Pi's daily capture cuts off 30 minutes after sunset. Civil twilight in
 Pelham ends ~25–30 minutes after sunset, but the deep red/magenta afterglow —
 the "burn out" — frequently peaks 25–45 minutes after sunset and can persist
 through nautical twilight. Recent timelapses have been clipping right when the
 best color appears.
-
-The Mac config (`config.yaml`) already uses 60 min on the back side; the Pi was
-set to 30 separately and was never bumped.
 
 ## Goal
 
@@ -22,16 +18,25 @@ include the full afterglow.
 
 ## Decisions
 
-- Change `config-pi.yaml: capture.time_after_sunset_minutes` from `30` to `60`.
+- **Active config file on the Pi is `config.yaml`, not `config-pi.yaml`.**
+  `ConfigManager` defaults to `config.yaml`, and the `sunset-timelapse.service`
+  unit runs `main.py schedule --validate` with no `--config` override. Both
+  files exist on the Pi (both gitignored, separate per machine), but only
+  `config.yaml` is read. Runtime logs confirmed the Pi's effective window was
+  30/30, matching `config.yaml`'s values — `config-pi.yaml` was 60/60 but
+  unused. The CLAUDE.md narrative refers to `config-pi.yaml` as "Pi config",
+  but in practice it is dormant. Cleaning that up is out of scope here.
+- Change `config.yaml: capture.time_after_sunset_minutes` from `30` to `60`
+  **directly on the Pi via SSH**, since `config.yaml` is gitignored and
+  doesn't propagate through `git pull` / `update_pi.sh`.
 - Leave `time_before_sunset_minutes` at `30`. The pre-sunset side is rarely the
   problem and the existing 30-min lead is sufficient.
 - No code changes. `sunset_calculator.get_capture_window()` reads both keys
   with sensible defaults; the scheduler and capture loop use that result
   directly with no separate assumption about window length (verified by
-  grepping `capture.time_before_sunset_minutes` /
-  `capture.time_after_sunset_minutes` across the codebase — both are read only
-  in `sunset_calculator.py`).
-- `config.yaml` (Mac) is already at 60/60 and needs no change.
+  grepping both keys across the codebase — both are read only in
+  `sunset_calculator.py`).
+- Mac-local `config.yaml` is already at 60/60 and needs no change.
 
 ## Impact
 
