@@ -295,6 +295,36 @@ class StormWorkflow:
         observations = [o for o in tempest_monitor.observations if o.timestamp >= cutoff]
         return strikes, observations
 
+    def _send_storm_start_notification(
+        self,
+        conditions,           # StormConditions
+        start_time: datetime,
+        duration_seconds: int,
+    ) -> None:
+        """Fire-and-forget start-of-capture email. Never raises."""
+        try:
+            subject = f"⛈️ Storm capture started — {start_time.strftime('%Y-%m-%d %H:%M')}"
+            end_time = start_time + timedelta(seconds=duration_seconds)
+            confidence_pct = int(round(conditions.confidence * 100))
+
+            lines = [
+                f"Storm capture started at {start_time.strftime('%H:%M:%S')} local.",
+                f"Planned duration: {duration_seconds // 60} minutes (ends ~{end_time.strftime('%H:%M')} local).",
+                f"Confidence: {confidence_pct}%",
+                "",
+                "Detection reasons:",
+            ]
+            for reason in conditions.trigger_reasons or ["(none reported)"]:
+                lines.append(f"  • {reason}")
+
+            if conditions.lightning_avg_distance is not None:
+                lines.append("")
+                lines.append(f"Nearest recent lightning: {conditions.lightning_avg_distance:.1f} km")
+
+            self.email_notifier.send_notification(subject, "\n".join(lines), is_html=False)
+        except Exception as e:
+            self.logger.warning(f"[STORM] Start notification send failed (non-fatal): {e}")
+
     def complete_storm_workflow(
         self,
         conditions,                 # StormConditions
@@ -310,6 +340,9 @@ class StormWorkflow:
         """
         target_date = start_time.date()
         self.logger.info(f"[STORM] Starting workflow for {target_date} at {start_time.time()}")
+        self._send_storm_start_notification(
+            conditions, start_time, self._compute_storm_duration_seconds(),
+        )
 
         try:
             # Step 1: Capture
