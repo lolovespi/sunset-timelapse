@@ -370,6 +370,21 @@ class TempestMonitor:
             # Store observation
             self.observations.append(observation)
 
+            # Live-activity signal for the disarm quiet-period timer — a looser
+            # bar than the capture-trigger thresholds below: "is weather still
+            # happening here," not "is it severe enough to record." See
+            # docs/superpowers/specs/2026-07-19-storm-arming-live-activity-design.md.
+            activity = precip_type != 0 or wind_gust_mph >= self.wind_gust_threshold / 2
+            if not activity and len(self.observations) >= 6:
+                now = datetime.now()
+                pressure_window = timedelta(minutes=30)
+                old_obs = [o for o in self.observations
+                           if now - o.timestamp >= pressure_window]
+                if old_obs and (pressure - old_obs[-1].pressure) < 0:
+                    activity = True
+            if activity:
+                self.last_storm_activity_time = datetime.now()
+
             # Log observation
             self.logger.debug(f"Observation: {temp_f:.1f}°F, {humidity:.0f}% RH, "
                             f"{pressure:.1f} hPa, Wind {wind_speed_mph:.1f}/{wind_gust_mph:.1f} mph, "
@@ -403,6 +418,13 @@ class TempestMonitor:
 
             # Store strike
             self.lightning_strikes.append(strike)
+
+            # Live-activity signal — any nearby strike counts, not gated by
+            # lightning_min_strikes (that's the capture-trigger bar, not the
+            # "is a storm happening" bar). See
+            # docs/superpowers/specs/2026-07-19-storm-arming-live-activity-design.md.
+            if distance_km <= self.lightning_max_distance:
+                self.last_storm_activity_time = datetime.now()
 
             self.logger.info(f"⚡ Lightning strike detected: {distance_km:.1f} km away, "
                            f"energy {energy}")
