@@ -482,15 +482,31 @@ class SunsetScheduler:
         self._reconcile_tempest_arming()
 
     def _reconcile_tempest_arming(self):
-        """Arm/disarm Tempest based on whether we're inside (or near) a watch window."""
+        """Arm/disarm Tempest based on forecast proximity and live activity.
+
+        The forecast decides when to start watching. Once armed, live Tempest
+        data decides when it's safe to stop — a forecast window disappearing
+        must never, by itself, disarm mid-storm. See
+        docs/superpowers/specs/2026-07-19-storm-arming-live-activity-design.md.
+        """
         lead = self.config.get('open_meteo.tempest_arm_lead_minutes', 30)
         trail = self.config.get('open_meteo.tempest_arm_trailing_minutes', 30)
+        quiet_minutes = self.config.get('open_meteo.tempest_disarm_quiet_minutes', 45)
+        safety_cap_hours = self.config.get('open_meteo.tempest_arm_safety_cap_hours', 6)
         now = datetime.now()
 
-        should_arm = any(
+        near_forecast_window = any(
             (window.start - timedelta(minutes=lead)) <= now <= (window.end + timedelta(minutes=trail))
             for window in self.storm_watch_windows
         )
+
+        live_activity_keeping_armed = (
+            self.tempest_monitor.armed
+            and self.tempest_monitor.recent_activity(quiet_minutes)
+            and not self.tempest_monitor.armed_duration_exceeds(safety_cap_hours)
+        )
+
+        should_arm = near_forecast_window or live_activity_keeping_armed
 
         if should_arm and not self.tempest_monitor.armed:
             self.tempest_monitor.arm()
