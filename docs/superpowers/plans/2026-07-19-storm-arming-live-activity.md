@@ -12,6 +12,7 @@
 
 - No pytest suite exists in this repo — `main.py test` is the validation harness, and one-off logic gets a standalone `verify_*.py` script with plain `assert`, not a `tests/` file. Follow the existing `verify_storm_lightning_arm.py` pattern exactly.
 - The Raspberry Pi's systemd service loads `config.yaml`, **not** `config-pi.yaml` — any new config key must be added to `config.yaml`.
+- `config.yaml` and `verify_*.py` are both gitignored (confirmed: `git ls-files` shows neither tracked). Each machine (this Mac, the Pi) keeps its own local `config.yaml` — it never travels via `git pull`/`update_pi.sh`, so config edits must be applied by hand on every machine that needs them. `verify_*.py` scripts are local-only dev aids: write and run them, but never `git add` them.
 - Never read, display, or edit `.env`, `.env.pi`, `.env.mac`, or `facebook_config.json`.
 - Deploying to the Pi (`update_pi.sh`) restarts the live production service — do not run it without explicit user confirmation immediately beforehand.
 - Reference design doc: `docs/superpowers/specs/2026-07-19-storm-arming-live-activity-design.md`. Every task below implements a specific section of it.
@@ -177,7 +178,7 @@ ALL CHECKS PASSED
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tempest_monitor.py verify_storm_disarm_quiet_period.py
+git add tempest_monitor.py
 git commit -m "TempestMonitor: add live-activity timestamp + armed-duration helpers"
 ```
 
@@ -362,7 +363,7 @@ Expected: `ALL CHECKS PASSED` (unchanged — confirms the new activity-tracking 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add tempest_monitor.py verify_storm_disarm_quiet_period.py
+git add tempest_monitor.py
 git commit -m "TempestMonitor: detect live storm activity from observations + strikes"
 ```
 
@@ -550,7 +551,11 @@ with:
                 self.tempest_monitor.disarm()
 ```
 
-- [ ] **Step 4: Add the new config keys**
+- [ ] **Step 4: Add the new config keys (local worktree copy, for testing only)**
+
+`config.yaml` is gitignored — this edit is local to the current working copy so the verify
+script below has real keys to read. It is not committed, and Task 4 applies the same edit
+by hand to the Mac's and Pi's actual `config.yaml` after this branch merges.
 
 In `config.yaml`, replace lines 329-330:
 
@@ -581,29 +586,65 @@ Expected: `ALL CHECKS PASSED`.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add sunset_scheduler.py config.yaml verify_storm_disarm_quiet_period.py
+git add sunset_scheduler.py
 git commit -m "Disarm storm watch on live-activity quiet period, not forecast churn"
+
+# config.yaml is gitignored (local per-machine file) — it does not get
+# committed. The two new keys were already added to this worktree's local
+# config.yaml in Step 4 so the verify script above could pass; Task 4
+# applies the same edit by hand to the Mac's and Pi's real config.yaml.
 ```
 
 ---
 
 ### Task 4: Deploy to the Pi
 
-**Files:** none (deployment only)
+**Run by the controller directly, not dispatched to an implementer subagent** —
+this is a production deployment step, and it only makes sense **after** Tasks
+1-3 have been reviewed and merged to `main` via `superpowers:finishing-a-development-branch`.
+`update_pi.sh` does `git pull origin main`, so the Pi can only pick up the
+code changes once they're actually on `main`.
 
-**Interfaces:** none — this task ships Tasks 1-3's already-committed changes.
+**Files:** none (deployment + local config edits only)
+
+**Interfaces:** none — this task ships Tasks 1-3's already-merged changes.
 
 - [ ] **Step 1: Confirm with the user before touching the live service**
 
 `update_pi.sh` restarts the production `sunset-timelapse` systemd service on the Pi.
-Ask the user to confirm it's OK to deploy now before running anything in this task.
+Confirm with the user that Tasks 1-3 are merged to `main` and it's OK to deploy now.
 
-- [ ] **Step 2: Push local commits**
+- [ ] **Step 2: Add the new config keys to the Pi's `config.yaml` directly (it does not travel via git)**
 
-Run: `git push origin main`
-Expected: the three commits from Tasks 1-3 appear on `origin/main`.
+Run:
+```bash
+ssh sunset@sunset.mvp 'cd sunset-timelapse && python3 - <<"EOF"
+path = "config.yaml"
+text = open(path).read()
+if "tempest_disarm_quiet_minutes" in text:
+    print("already present, skipping")
+else:
+    lines = text.splitlines(keepends=True)
+    out = []
+    for line in lines:
+        out.append(line)
+        if line.startswith("  tempest_arm_trailing_minutes:"):
+            out.append("  tempest_disarm_quiet_minutes: 45    # once armed, stay armed until this many quiet minutes pass (live activity, not forecast)\n")
+            out.append("  tempest_arm_safety_cap_hours: 6     # hard ceiling on continuous armed duration, regardless of live activity\n")
+    open(path, "w").writelines(out)
+    print("keys added")
+EOF
+'
+```
+Expected: `keys added` (or `already present, skipping` if re-run).
 
-- [ ] **Step 3: Deploy on the Pi**
+- [ ] **Step 3: Add the same two keys to this Mac's local `config.yaml`**
+
+In the main checkout (`/Users/lolovespi/Documents/GitHub/sunset-timelapse/config.yaml`,
+**not** this worktree's copy), apply the same edit as Task 3 Step 4 by hand, so the
+canonical desktop config stays structurally in sync with the Pi's.
+
+- [ ] **Step 4: Deploy the merged code on the Pi**
 
 Run (after user confirmation from Step 1):
 ```bash
@@ -611,7 +652,7 @@ ssh sunset@sunset.mvp 'cd sunset-timelapse && ./update_pi.sh'
 ```
 Expected output ends with `🎉 Update complete!` and a systemd status block showing `Active: active (running)`.
 
-- [ ] **Step 4: Confirm the new config keys loaded**
+- [ ] **Step 5: Confirm the new config keys loaded**
 
 Run:
 ```bash
@@ -624,15 +665,17 @@ print(\"safety_cap_hours:\", cfg.get(\"open_meteo.tempest_arm_safety_cap_hours\"
 ```
 Expected: `quiet_minutes: 45` and `safety_cap_hours: 6` (not `<missing>`).
 
-- [ ] **Step 5: Run the verify script on the Pi as a smoke check**
+- [ ] **Step 6: Run the verify script on the Pi as a smoke check**
 
-Run:
+`verify_storm_disarm_quiet_period.py` is gitignored, so `update_pi.sh` never copies it —
+send it over explicitly:
 ```bash
+scp verify_storm_disarm_quiet_period.py sunset@sunset.mvp:sunset-timelapse/
 ssh sunset@sunset.mvp 'cd sunset-timelapse && source venv/bin/activate && python3 verify_storm_disarm_quiet_period.py'
 ```
 Expected: `ALL CHECKS PASSED`.
 
-- [ ] **Step 6: Watch the next arm cycle in the journal**
+- [ ] **Step 7: Watch the next arm cycle in the journal**
 
 Run:
 ```bash
