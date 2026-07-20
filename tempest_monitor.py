@@ -111,6 +111,9 @@ class TempestMonitor:
         self.storm_active = False
         self.last_storm_capture_time = None
 
+        self.last_storm_activity_time: Optional[datetime] = None
+        self.armed_since: Optional[datetime] = None
+
         # Callbacks for storm events
         self.storm_callbacks: List[Callable[[StormConditions], None]] = []
         self.armed = False
@@ -147,6 +150,7 @@ class TempestMonitor:
         """Allow storm callbacks to fire. Called by scheduler when entering a watch window."""
         if not self.armed:
             self.logger.info("TempestMonitor armed — storm callbacks now active")
+            self.armed_since = datetime.now()
         self.armed = True
 
     def disarm(self):
@@ -154,6 +158,24 @@ class TempestMonitor:
         if self.armed:
             self.logger.info("TempestMonitor disarmed — storm callbacks suppressed")
         self.armed = False
+        self.armed_since = None
+
+    def recent_activity(self, within_minutes: float) -> bool:
+        """True if a live storm-relevant signal was observed within the last
+        `within_minutes` minutes. See
+        docs/superpowers/specs/2026-07-19-storm-arming-live-activity-design.md.
+        """
+        if self.last_storm_activity_time is None:
+            return False
+        elapsed_minutes = (datetime.now() - self.last_storm_activity_time).total_seconds() / 60.0
+        return elapsed_minutes <= within_minutes
+
+    def armed_duration_exceeds(self, hours: float) -> bool:
+        """True if continuously armed for longer than `hours` (safety cap)."""
+        if self.armed_since is None:
+            return False
+        elapsed_hours = (datetime.now() - self.armed_since).total_seconds() / 3600.0
+        return elapsed_hours > hours
 
     def _fire_storm_callbacks(self, conditions) -> bool:
         """Fire all registered storm callbacks if armed OR if live lightning is
@@ -348,6 +370,21 @@ class TempestMonitor:
             # Store observation
             self.observations.append(observation)
 
+            # Live-activity signal for the disarm quiet-period timer — a looser
+            # bar than the capture-trigger thresholds below: "is weather still
+            # happening here," not "is it severe enough to record." See
+            # docs/superpowers/specs/2026-07-19-storm-arming-live-activity-design.md.
+            activity = precip_type != 0 or wind_gust_mph >= self.wind_gust_threshold / 2
+            if not activity and len(self.observations) >= 6:
+                now = datetime.now()
+                pressure_window = timedelta(minutes=30)
+                old_obs = [o for o in self.observations
+                           if now - o.timestamp >= pressure_window]
+                if old_obs and (pressure - old_obs[-1].pressure) < 0:
+                    activity = True
+            if activity:
+                self.last_storm_activity_time = datetime.now()
+
             # Log observation
             self.logger.debug(f"Observation: {temp_f:.1f}°F, {humidity:.0f}% RH, "
                             f"{pressure:.1f} hPa, Wind {wind_speed_mph:.1f}/{wind_gust_mph:.1f} mph, "
@@ -381,6 +418,13 @@ class TempestMonitor:
 
             # Store strike
             self.lightning_strikes.append(strike)
+
+            # Live-activity signal — any nearby strike counts, not gated by
+            # lightning_min_strikes (that's the capture-trigger bar, not the
+            # "is a storm happening" bar). See
+            # docs/superpowers/specs/2026-07-19-storm-arming-live-activity-design.md.
+            if distance_km <= self.lightning_max_distance:
+                self.last_storm_activity_time = datetime.now()
 
             self.logger.info(f"⚡ Lightning strike detected: {distance_km:.1f} km away, "
                            f"energy {energy}")
