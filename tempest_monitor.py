@@ -111,6 +111,9 @@ class TempestMonitor:
         self.storm_active = False
         self.last_storm_capture_time = None
 
+        self.last_storm_activity_time: Optional[datetime] = None
+        self.armed_since: Optional[datetime] = None
+
         # Callbacks for storm events
         self.storm_callbacks: List[Callable[[StormConditions], None]] = []
         self.armed = False
@@ -147,6 +150,7 @@ class TempestMonitor:
         """Allow storm callbacks to fire. Called by scheduler when entering a watch window."""
         if not self.armed:
             self.logger.info("TempestMonitor armed — storm callbacks now active")
+            self.armed_since = datetime.now()
         self.armed = True
 
     def disarm(self):
@@ -154,6 +158,24 @@ class TempestMonitor:
         if self.armed:
             self.logger.info("TempestMonitor disarmed — storm callbacks suppressed")
         self.armed = False
+        self.armed_since = None
+
+    def recent_activity(self, within_minutes: float) -> bool:
+        """True if a live storm-relevant signal was observed within the last
+        `within_minutes` minutes. See
+        docs/superpowers/specs/2026-07-19-storm-arming-live-activity-design.md.
+        """
+        if self.last_storm_activity_time is None:
+            return False
+        elapsed_minutes = (datetime.now() - self.last_storm_activity_time).total_seconds() / 60.0
+        return elapsed_minutes <= within_minutes
+
+    def armed_duration_exceeds(self, hours: float) -> bool:
+        """True if continuously armed for longer than `hours` (safety cap)."""
+        if self.armed_since is None:
+            return False
+        elapsed_hours = (datetime.now() - self.armed_since).total_seconds() / 3600.0
+        return elapsed_hours > hours
 
     def _fire_storm_callbacks(self, conditions) -> bool:
         """Fire all registered storm callbacks if armed OR if live lightning is
