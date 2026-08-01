@@ -385,6 +385,26 @@ class TempestMonitor:
             if activity:
                 self.last_storm_activity_time = datetime.now()
 
+            # Lightning fallback: evt_strike UDP messages aren't reliably
+            # delivered by this hub, but obs_st's own strike count/distance
+            # fields are. Synthesize entries into the same deque
+            # _process_lightning_strike (the evt_strike path) already
+            # populates, so _evaluate_storm_conditions needs no changes. See
+            # docs/superpowers/specs/2026-07-31-lightning-obs-fallback-design.md.
+            if lightning_strike_count is not None and lightning_strike_count > 0 \
+                    and lightning_avg_distance is not None:
+                synthesized_count = min(lightning_strike_count, self.lightning_strikes.maxlen)
+                for _ in range(synthesized_count):
+                    self.lightning_strikes.append(
+                        LightningStrike(timestamp=timestamp, distance_km=lightning_avg_distance, energy=0)
+                    )
+                if lightning_avg_distance <= self.lightning_max_distance:
+                    self.last_storm_activity_time = datetime.now()
+                self.logger.info(
+                    f"⚡ Lightning strikes from obs_st: {lightning_strike_count} strikes, "
+                    f"avg distance {lightning_avg_distance:.1f} km"
+                )
+
             # Log observation
             self.logger.debug(f"Observation: {temp_f:.1f}°F, {humidity:.0f}% RH, "
                             f"{pressure:.1f} hPa, Wind {wind_speed_mph:.1f}/{wind_gust_mph:.1f} mph, "
