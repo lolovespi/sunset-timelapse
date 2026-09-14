@@ -7,7 +7,7 @@ Complements the UDP-based tempest_monitor.py with on-demand data retrieval.
 import logging
 import os
 from datetime import datetime, date
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 import requests
 
@@ -166,6 +166,46 @@ class TempestAPI:
         except (KeyError, IndexError, TypeError) as e:
             self.logger.error(f"Failed to parse historical Tempest response: {e}")
             return None
+
+    def get_recent_device_observations(self, since_epoch: int) -> List[list]:
+        """
+        Fetch raw device observations newer than since_epoch, for feeding
+        into storm-trigger evaluation (as a cloud-polling stand-in for the
+        UDP obs_st broadcast, which has the same fixed-position array format).
+
+        Args:
+            since_epoch: Unix timestamp; only observations after this are useful,
+                         but the full window is returned for the caller to filter.
+
+        Returns:
+            List of raw obs arrays (possibly empty), oldest first. Never None,
+            so callers can iterate without a null check.
+        """
+        device_id = self.config.get('tempest.device_id', '')
+        if not device_id or not self.api_token:
+            self.logger.warning("Tempest device_id or API token not configured for cloud polling")
+            return []
+
+        url = f"{self.BASE_URL}/observations/device/{device_id}"
+        params = {
+            "token": self.api_token,
+            "time_start": since_epoch,
+            "time_end": int(datetime.now().timestamp()),
+        }
+
+        try:
+            resp = requests.get(url, params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            observations = data.get("obs", []) or []
+            return sorted(observations, key=lambda o: o[0])
+
+        except requests.RequestException as e:
+            self.logger.error(f"Tempest cloud polling request failed: {e}")
+            return []
+        except (KeyError, IndexError, TypeError) as e:
+            self.logger.error(f"Failed to parse Tempest cloud polling response: {e}")
+            return []
 
     def get_weather_block(self, target_date: date = None, sunset_hour: int = 19) -> Optional[Dict]:
         """

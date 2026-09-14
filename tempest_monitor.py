@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from config_manager import get_config
 from geography_calculator import GeographyCalculator
+from tempest_api import TempestAPI
 
 
 @dataclass
@@ -85,6 +86,8 @@ class TempestMonitor:
         self.udp_enabled = self.config.get('tempest.udp.enabled', True)
         self.udp_port = self.config.get('tempest.udp.port', 50222)
         self.udp_timeout = self.config.get('tempest.udp.timeout_seconds', 300)
+        self.cloud_poll_enabled = self.config.get('tempest.cloud_polling.enabled', False)
+        self.cloud_poll_interval = self.config.get('tempest.cloud_polling.interval_seconds', 60)
 
         # Trigger thresholds
         self.lightning_enabled = self.config.get('tempest.triggers.lightning.enabled', True)
@@ -106,6 +109,13 @@ class TempestMonitor:
         self.udp_thread = None
         self.running = False
         self.last_message_time = None
+
+        # Cloud REST polling (independent lifecycle from the UDP listener,
+        # so one can be stopped without affecting the other)
+        self.tempest_api: Optional[TempestAPI] = None
+        self.cloud_poll_thread = None
+        self.cloud_poll_running = False
+        self._cloud_last_obs_epoch: Optional[int] = None
 
         # Storm detection state
         self.storm_active = False
@@ -250,6 +260,80 @@ class TempestMonitor:
             self.udp_socket = None
 
         self.logger.info("UDP listener stopped")
+
+    def start_cloud_poll_loop(self):
+        """
+        Start polling the Tempest REST API in a background thread.
+
+        Stopgap data source for storm-trigger evaluation when UDP broadcasts
+        aren't reachable (e.g. the Tempest hub and Pi are no longer on the
+        same LAN). Runs independently of the UDP listener — both feed the
+        same _process_observation()/_evaluate_storm_conditions() pipeline.
+        """
+        if not self.enabled or not self.cloud_poll_enabled:
+            self.logger.info("Cloud polling not started (disabled in config)")
+            return False
+
+        if self.cloud_poll_running:
+            self.logger.warning("Cloud polling already running")
+            return False
+
+        self.tempest_api = TempestAPI()
+        if not self.tempest_api.is_configured():
+            self.logger.error("Cloud polling not started: Tempest API not configured "
+                               "(missing station_id or TEMPEST_API_TOKEN)")
+            return False
+
+        self.cloud_poll_running = True
+        self.cloud_poll_thread = threading.Thread(target=self._cloud_poll_loop, daemon=True)
+        self.cloud_poll_thread.start()
+
+        self.logger.info(f"Cloud polling started (every {self.cloud_poll_interval}s)")
+        return True
+
+    def stop_cloud_poll_loop(self):
+        """Stop cloud REST polling"""
+        if not self.cloud_poll_running:
+            return
+
+        self.logger.info("Stopping cloud polling...")
+        self.cloud_poll_running = False
+
+        if self.cloud_poll_thread:
+            self.cloud_poll_thread.join(timeout=self.cloud_poll_interval + 10)
+            self.cloud_poll_thread = None
+
+        self.logger.info("Cloud polling stopped")
+
+    def _cloud_poll_loop(self):
+        """Background loop: poll the Tempest REST API and feed new observations
+        into the same handling the UDP obs_st listener uses, so all existing
+        trigger logic (lightning, pressure/temp/solar drops, rain) applies
+        unchanged."""
+        self.logger.info("Cloud polling loop started")
+        since_epoch = int(time.time()) - self.cloud_poll_interval
+
+        while self.cloud_poll_running:
+            time.sleep(self.cloud_poll_interval)
+            if not self.cloud_poll_running:
+                break
+
+            try:
+                rows = self.tempest_api.get_recent_device_observations(since_epoch)
+                for row in rows:
+                    if self._cloud_last_obs_epoch is not None and row[0] <= self._cloud_last_obs_epoch:
+                        continue
+                    self.last_message_time = datetime.now()
+                    self._process_observation({'obs': [row]})
+                    self._cloud_last_obs_epoch = row[0]
+
+                if self._cloud_last_obs_epoch is not None:
+                    since_epoch = self._cloud_last_obs_epoch
+
+            except Exception as e:
+                self.logger.error(f"Error in cloud polling loop: {e}")
+
+        self.logger.info("Cloud polling loop ended")
 
     def _udp_listener_loop(self):
         """Main UDP listener loop (runs in background thread)"""

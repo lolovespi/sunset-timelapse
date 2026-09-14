@@ -1235,6 +1235,10 @@ class SunsetScheduler:
             else:
                 self.logger.warning("Tempest UDP listener failed to start — storm reactive layer disabled")
 
+            cloud_started = self.tempest_monitor.start_cloud_poll_loop()
+            if cloud_started:
+                self.logger.info("Tempest cloud polling started")
+
         # Set up initial schedule
         self.schedule_daily_capture()
         
@@ -1287,6 +1291,10 @@ class SunsetScheduler:
             self.tempest_monitor.stop_udp_listener()
         except Exception as e:
             self.logger.warning(f"Error stopping Tempest listener: {e}")
+        try:
+            self.tempest_monitor.stop_cloud_poll_loop()
+        except Exception as e:
+            self.logger.warning(f"Error stopping Tempest cloud polling: {e}")
 
         # Wait for current capture to complete if running
         if self.current_capture_thread and self.current_capture_thread.is_alive():
