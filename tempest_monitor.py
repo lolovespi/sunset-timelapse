@@ -187,13 +187,22 @@ class TempestMonitor:
         elapsed_hours = (datetime.now() - self.armed_since).total_seconds() / 3600.0
         return elapsed_hours > hours
 
-    def _fire_storm_callbacks(self, conditions) -> bool:
+    def _fire_storm_callbacks(self, conditions, visible: bool = True, vis_reason: str = "") -> bool:
         """Fire all registered storm callbacks if armed OR if live lightning is
         confirmed.
 
         Confirmed nearby lightning overrides the forecast-driven arming gate so a
         real storm is captured even before (or without) a forecast watch window.
         See docs/superpowers/specs/2026-06-01-storm-lightning-auto-arm-design.md.
+
+        Tempest doesn't report lightning bearing, so `max_distance_km` alone
+        can't tell whether a strike is anywhere near the camera's view — on this
+        site's config (30km radius) that let storms well outside the frame
+        trigger a capture. When the override path is the only reason we'd fire
+        (i.e. still disarmed), gate it on `is_storm_likely_visible()`'s wind-
+        direction proxy: an "insufficient data" verdict is not a veto (we
+        genuinely don't know yet), but a confident "outside camera arc" verdict
+        is.
 
         Returns True if callbacks were actually invoked, False if suppressed.
         """
@@ -204,6 +213,12 @@ class TempestMonitor:
             )
             return False
         if not self.armed and conditions.lightning_active:
+            if self.lightning_require_fov and not visible and "insufficient data" not in vis_reason:
+                self.logger.info(
+                    f"Lightning override suppressed — {vis_reason}; storm not "
+                    "likely visible from camera and TempestMonitor is disarmed"
+                )
+                return False
             self.logger.info(
                 "Lightning override — confirmed nearby lightning; firing storm "
                 "callbacks despite disarmed forecast state"
@@ -683,7 +698,7 @@ class TempestMonitor:
                 # Call registered callbacks. Only start the cooldown when a
                 # capture actually fires — a suppressed detection must not
                 # consume the cooldown (root cause of the 2026-06-01 miss).
-                fired = self._fire_storm_callbacks(conditions)
+                fired = self._fire_storm_callbacks(conditions, visible, vis_reason)
                 if fired:
                     self.last_storm_capture_time = now
         else:
