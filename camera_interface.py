@@ -4,6 +4,7 @@ Uses direct RTSP for camera control and image capture
 """
 
 import logging
+import re
 import threading
 import time
 import io
@@ -65,16 +66,13 @@ class CameraInterface:
             
         self.logger.info(f"Camera interface initialized for {self.ip}")
         
-    def _sanitize_rtsp_url_for_logging(self, rtsp_url: str) -> str:
-        """Remove credentials from RTSP URL for safe logging"""
-        if '@' in rtsp_url:
-            # Replace credentials with ***
-            protocol, rest = rtsp_url.split('://', 1)
-            if '@' in rest:
-                _, after_creds = rest.split('@', 1)
-                return f"{protocol}://***:***@{after_creds}"
-        return rtsp_url
-        
+    # Credentials may themselves contain '@', so match greedily up to the last '@' before the path.
+    _URL_CREDS_RE = re.compile(r'(\w+://)[^/\s]*@')
+
+    def _sanitize_rtsp_url_for_logging(self, text: str) -> str:
+        """Mask credentials in any URL(s) found in text (a URL, ffmpeg stderr, etc.) for safe logging"""
+        return self._URL_CREDS_RE.sub(r'\1***:***@', text or '')
+
     def connect(self) -> bool:
         """
         Test RTSP connection (no ONVIF needed)
@@ -277,7 +275,7 @@ class CameraInterface:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
                 
                 if result.returncode != 0:
-                    self.logger.error(f"FFmpeg recording failed for chunk {chunk_idx + 1}: {result.stderr}")
+                    self.logger.error(f"FFmpeg recording failed for chunk {chunk_idx + 1}: {self._sanitize_rtsp_url_for_logging(result.stderr)}")
                     # Try to continue with other chunks
                     temp_video_path.unlink(missing_ok=True)
                 else:
@@ -882,7 +880,7 @@ class CameraInterface:
                 self.logger.info(f"Successfully downloaded recording to {save_path}")
                 return True
             else:
-                self.logger.error(f"Failed to download recording: {result.stderr}")
+                self.logger.error(f"Failed to download recording: {self._sanitize_rtsp_url_for_logging(result.stderr)}")
                 return False
                 
         except subprocess.TimeoutExpired:
