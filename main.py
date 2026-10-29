@@ -90,14 +90,25 @@ def cmd_historical(args):
     # Process historical footage
     created_videos = retrieval.create_historical_timelapse(
         start_date, end_date,
-        upload_to_youtube=args.upload,
+        upload_to_youtube=args.upload and not args.publish,  # publish handles YouTube itself
         throttle_seconds=args.throttle_seconds
     )
-    
+
     if created_videos:
         logger.info(f"Successfully created {len(created_videos)} videos:")
         for video in created_videos:
             print(f"  {video}")
+
+        if args.publish:
+            scheduler = SunsetScheduler()
+            for video in created_videos:
+                # Videos are named Sunset_MM_DD_YY.<ext>
+                video_date = datetime.strptime(Path(video).stem, 'Sunset_%m_%d_%y').date()
+                logger.info(f"Publishing recovered video for {video_date}...")
+                try:
+                    scheduler.publish_recovered_footage(Path(video), video_date)
+                except Exception as e:
+                    logger.error(f"Publishing failed for {video_date}: {e}")
     else:
         logger.error("No videos were created")
         sys.exit(1)
@@ -1019,6 +1030,10 @@ Examples:
                            help='Upload videos to YouTube')
     hist_parser.add_argument('--list', dest='list_available', action='store_true',
                            help='List available dates instead of processing')
+    hist_parser.add_argument('--publish', action='store_true',
+                           help='Publish recovered videos like the daily workflow: Drive, Facebook '
+                                '(post + Reel), Instagram and YouTube with one shared AI caption '
+                                '(supersedes --upload)')
     hist_parser.add_argument('--throttle', dest='throttle_seconds', type=float, default=None,
                            help='Seconds to pause between days that contact the camera '
                                 '(default: historical.throttle_seconds in config, 0 = off)')

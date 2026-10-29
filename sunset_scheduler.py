@@ -818,116 +818,7 @@ class SunsetScheduler:
                 self.logger.info(f"✓ Successfully recovered footage for {yesterday} via historical retrieval")
 
                 video_path = created_videos[0]
-                sunset_start, sunset_end = self.sunset_calc.get_capture_window(yesterday)
-
-                # Create 12s short version for FB/IG (5x speed)
-                short_video_path = video_path.with_name(
-                    f"{video_path.stem}_short.mp4"
-                )
-                if not self.video_processor.create_short_version(
-                    video_path, short_video_path, speed_factor=5.0
-                ):
-                    self.logger.warning(
-                        "Recovery: Short video creation failed — FB/IG will use main video"
-                    )
-                    short_video_path = video_path
-
-                # Gather weather and visual data for all platforms
-                weather_block = None
-                visual_block = None
-                try:
-                    sunset_hour = sunset_start.hour + 1
-                    weather_block = self.tempest_api.get_weather_block(yesterday, sunset_hour)
-                    if weather_block:
-                        self.logger.info(f"Recovery: Historical weather added: {weather_block['conditions']}, "
-                                       f"{weather_block['temperature_f']}°F (observed {weather_block['observed_at']})")
-                except Exception as e:
-                    self.logger.warning(f"Recovery: Failed to fetch weather data: {e}")
-
-                try:
-                    visual_block = self.visual_analyzer.analyze_video(video_path)
-                    if visual_block:
-                        self.logger.info(f"Recovery: Visual analysis added: {visual_block['sunset_type']}")
-                except Exception as e:
-                    self.logger.warning(f"Recovery: Visual analysis failed: {e}")
-
-                # Upload to Google Drive
-                drive_enabled = self.config.get('drive.enabled', False)
-                if drive_enabled:
-                    try:
-                        drive_metadata = {
-                            'sunset_start': sunset_start.isoformat(),
-                            'sunset_end': sunset_end.isoformat(),
-                            'capture_date': yesterday.isoformat()
-                        }
-                        if weather_block:
-                            drive_metadata['weather'] = weather_block
-                        if visual_block:
-                            drive_metadata['visual_analysis'] = visual_block
-
-                        drive_result = self.drive_uploader.upload_video(video_path, yesterday, drive_metadata)
-                        if drive_result:
-                            self.logger.info(f"Recovery: Video uploaded to Google Drive: {drive_result['filename']}")
-                        else:
-                            self.logger.warning("Recovery: Google Drive upload failed")
-                            self.email_notifier.send_notification(
-                                f"Recovery: Drive Upload Failed - {yesterday}",
-                                f"Video was recovered for {yesterday} but Google Drive upload failed."
-                            )
-                    except Exception as e:
-                        self.logger.warning(f"Recovery: Google Drive upload error: {e}")
-                        self.email_notifier.send_notification(
-                            f"Recovery: Drive Upload Error - {yesterday}",
-                            f"Error uploading recovered video to Google Drive:\n\n{str(e)}"
-                        )
-
-                # Generate ONE shared caption for all platforms
-                social_metadata = {
-                    'date': yesterday.isoformat(),
-                    'capture_date': yesterday.isoformat(),
-                }
-                if weather_block:
-                    social_metadata['weather'] = weather_block
-                if visual_block:
-                    social_metadata['visual_analysis'] = visual_block
-
-                shared_caption = None
-                try:
-                    shared_caption = self.facebook_uploader.generate_caption(
-                        social_metadata, video_path=str(video_path)
-                    )
-                    self.logger.info(f"Recovery: Shared caption: {shared_caption}")
-                except Exception as e:
-                    self.logger.warning(f"Recovery: Caption generation failed: {e}")
-
-                # Post to Facebook + Instagram with shared caption (use short version)
-                try:
-                    fb_success = self.facebook_uploader.post_sunset(
-                        short_video_path, social_metadata, caption_override=shared_caption
-                    )
-                    if fb_success:
-                        self.logger.info("Recovery: Posted to Facebook/Instagram")
-                    else:
-                        self.logger.warning("Recovery: Facebook/Instagram posting failed")
-                except Exception as e:
-                    self.logger.warning(f"Recovery: Facebook/Instagram error: {e}")
-
-                # Upload to YouTube with the same shared caption as description
-                try:
-                    yt_success = self.upload_to_youtube_with_sbs(
-                        video_path, yesterday,
-                        actual_start_time=sunset_start,
-                        actual_end_time=sunset_end,
-                        weather_block=weather_block,
-                        visual_block=visual_block,
-                        description_override=shared_caption,
-                    )
-                    if yt_success:
-                        self.logger.info("Recovery: Uploaded to YouTube")
-                    else:
-                        self.logger.warning("Recovery: YouTube upload failed")
-                except Exception as e:
-                    self.logger.warning(f"Recovery: YouTube upload error: {e}")
+                self.publish_recovered_footage(video_path, yesterday)
 
                 self.email_notifier.send_notification(
                     f"Automatic Recovery: {yesterday}",
@@ -948,6 +839,124 @@ class SunsetScheduler:
                 f"Recovery Error: {date.today() - timedelta(days=1)}",
                 f"Historical recovery process crashed:\n\n{str(e)}"
             )
+
+    def publish_recovered_footage(self, video_path: Path, target_date: date):
+        """
+        Publish a recovered sunset video everywhere the daily workflow does:
+        Drive, Facebook (post + Reel) and Instagram, and YouTube, all sharing one
+        AI caption. Facebook/Instagram/Reel are idempotent per date via the
+        tracking DB; Drive and YouTube are not, so call this once per date.
+        """
+        sunset_start, sunset_end = self.sunset_calc.get_capture_window(target_date)
+
+        # Create 12s short version for FB/IG (5x speed)
+        short_video_path = video_path.with_name(
+            f"{video_path.stem}_short.mp4"
+        )
+        if not self.video_processor.create_short_version(
+            video_path, short_video_path, speed_factor=5.0
+        ):
+            self.logger.warning(
+                "Recovery: Short video creation failed — FB/IG will use main video"
+            )
+            short_video_path = video_path
+
+        # Gather weather and visual data for all platforms
+        weather_block = None
+        visual_block = None
+        try:
+            sunset_hour = sunset_start.hour + 1
+            weather_block = self.tempest_api.get_weather_block(target_date, sunset_hour)
+            if weather_block:
+                self.logger.info(f"Recovery: Historical weather added: {weather_block['conditions']}, "
+                               f"{weather_block['temperature_f']}°F (observed {weather_block['observed_at']})")
+        except Exception as e:
+            self.logger.warning(f"Recovery: Failed to fetch weather data: {e}")
+
+        try:
+            visual_block = self.visual_analyzer.analyze_video(video_path)
+            if visual_block:
+                self.logger.info(f"Recovery: Visual analysis added: {visual_block['sunset_type']}")
+        except Exception as e:
+            self.logger.warning(f"Recovery: Visual analysis failed: {e}")
+
+        # Upload to Google Drive
+        drive_enabled = self.config.get('drive.enabled', False)
+        if drive_enabled:
+            try:
+                drive_metadata = {
+                    'sunset_start': sunset_start.isoformat(),
+                    'sunset_end': sunset_end.isoformat(),
+                    'capture_date': target_date.isoformat()
+                }
+                if weather_block:
+                    drive_metadata['weather'] = weather_block
+                if visual_block:
+                    drive_metadata['visual_analysis'] = visual_block
+
+                drive_result = self.drive_uploader.upload_video(video_path, target_date, drive_metadata)
+                if drive_result:
+                    self.logger.info(f"Recovery: Video uploaded to Google Drive: {drive_result['filename']}")
+                else:
+                    self.logger.warning("Recovery: Google Drive upload failed")
+                    self.email_notifier.send_notification(
+                        f"Recovery: Drive Upload Failed - {target_date}",
+                        f"Video was recovered for {target_date} but Google Drive upload failed."
+                    )
+            except Exception as e:
+                self.logger.warning(f"Recovery: Google Drive upload error: {e}")
+                self.email_notifier.send_notification(
+                    f"Recovery: Drive Upload Error - {target_date}",
+                    f"Error uploading recovered video to Google Drive:\n\n{str(e)}"
+                )
+
+        # Generate ONE shared caption for all platforms
+        social_metadata = {
+            'date': target_date.isoformat(),
+            'capture_date': target_date.isoformat(),
+        }
+        if weather_block:
+            social_metadata['weather'] = weather_block
+        if visual_block:
+            social_metadata['visual_analysis'] = visual_block
+
+        shared_caption = None
+        try:
+            shared_caption = self.facebook_uploader.generate_caption(
+                social_metadata, video_path=str(video_path)
+            )
+            self.logger.info(f"Recovery: Shared caption: {shared_caption}")
+        except Exception as e:
+            self.logger.warning(f"Recovery: Caption generation failed: {e}")
+
+        # Post to Facebook + Instagram with shared caption (use short version)
+        try:
+            fb_success = self.facebook_uploader.post_sunset(
+                short_video_path, social_metadata, caption_override=shared_caption
+            )
+            if fb_success:
+                self.logger.info("Recovery: Posted to Facebook/Instagram")
+            else:
+                self.logger.warning("Recovery: Facebook/Instagram posting failed")
+        except Exception as e:
+            self.logger.warning(f"Recovery: Facebook/Instagram error: {e}")
+
+        # Upload to YouTube with the same shared caption as description
+        try:
+            yt_success = self.upload_to_youtube_with_sbs(
+                video_path, target_date,
+                actual_start_time=sunset_start,
+                actual_end_time=sunset_end,
+                weather_block=weather_block,
+                visual_block=visual_block,
+                description_override=shared_caption,
+            )
+            if yt_success:
+                self.logger.info("Recovery: Uploaded to YouTube")
+            else:
+                self.logger.warning("Recovery: YouTube upload failed")
+        except Exception as e:
+            self.logger.warning(f"Recovery: YouTube upload error: {e}")
 
     def cleanup_old_files(self):
         """Clean up old files based on configuration"""
