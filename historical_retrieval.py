@@ -744,6 +744,19 @@ class HistoricalRetrieval:
             
         return extracted_frames
         
+    def _frames_cover_window(self, frames: List[Path], target_date: date, tolerance_minutes: int = 10) -> bool:
+        """True if frames span the day's capture window, so a truncated earlier run isn't reused."""
+        try:
+            first = self._extract_timestamp_from_filename(frames[0].name)
+            last = self._extract_timestamp_from_filename(frames[-1].name)
+            start, end = self.sunset_calc.get_capture_window(target_date)
+        except Exception as e:
+            self.logger.warning(f"Could not verify frame coverage for {target_date}: {e}")
+            return False
+        start, end = start.replace(tzinfo=None), end.replace(tzinfo=None)
+        slack = timedelta(minutes=tolerance_minutes)
+        return first <= start + slack and last >= end - slack
+
     def retrieve_historical_sunset(self, target_date: date) -> Optional[List[Path]]:
         """
         Retrieve and process historical sunset footage for a specific date
@@ -900,8 +913,13 @@ class HistoricalRetrieval:
                     if historical_dir.exists():
                         frames_list = sorted(list(historical_dir.glob('frame_*.jpg')))
                         if frames_list and len(frames_list) > 10:
-                            self.logger.info(f"Found {len(frames_list)} existing frames from previous run")
-                            existing_frames = frames_list
+                            if self._frames_cover_window(frames_list, current_date):
+                                self.logger.info(f"Found {len(frames_list)} existing frames from previous run")
+                                existing_frames = frames_list
+                            else:
+                                self.logger.warning(
+                                    f"Existing frames for {current_date} do not cover the capture window "
+                                    f"(interrupted run?); retrieving again")
 
                     # Only retrieve if we don't have frames
                     if existing_frames:
