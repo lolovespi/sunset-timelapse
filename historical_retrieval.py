@@ -17,6 +17,7 @@ import cv2
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+from reolink_utils import call_with_deadline, make_timeout_session
 
 from config_manager import get_config
 from sunset_calculator import SunsetCalculator
@@ -75,6 +76,7 @@ class HistoricalRetrieval:
         # Retrieval settings
         self.timeout = self.config.get('advanced.connection_timeout_seconds', 30)
         self.max_retries = self.config.get('advanced.max_retries', 3)
+        self.login_retry_delay = self.config.get('advanced.retry_delay_seconds', 30)
         self.max_workers = 4  # For parallel downloads
         
         self.logger.info("Historical retrieval system initialized")
@@ -208,11 +210,21 @@ class HistoricalRetrieval:
             self.logger.info("Using official Reolink API to search for recordings")
 
             # Create camera instance (defer_login=True to control login timing)
-            reo_camera = ReoCamera(self.ip, self.username, self.password, defer_login=True)
+            reo_camera = ReoCamera(self.ip, self.username, self.password, defer_login=True,
+                                   session=make_timeout_session())
 
-            # Try to login
-            login_success = reo_camera.login()
-            if not login_success or not reo_camera.token:
+            # Try to login, backing off between attempts: the camera allows only a few
+            # concurrent sessions, and a busy slot usually frees up within a minute.
+            login_success = False
+            for attempt in range(1, self.max_retries + 1):
+                login_success = reo_camera.login() and reo_camera.token
+                if login_success:
+                    break
+                if attempt < self.max_retries:
+                    self.logger.warning(f"Reolink login failed (attempt {attempt}/{self.max_retries}), "
+                                        f"retrying in {self.login_retry_delay}s")
+                    time.sleep(self.login_retry_delay)
+            if not login_success:
                 self.logger.warning("Could not establish camera session via Reolink API.")
                 self.logger.warning("This is often due to maximum concurrent session limit.")
                 self.logger.warning("Try stopping the scheduler on Raspberry Pi temporarily, or")
@@ -565,14 +577,16 @@ class HistoricalRetrieval:
             self.logger.info(f"Downloading via official Reolink API: {safe_filename}")
 
             # Create camera instance
-            reo_camera = ReoCamera(self.ip, self.username, self.password)
+            reo_camera = ReoCamera(self.ip, self.username, self.password,
+                                   session=make_timeout_session())
 
             try:
                 # Ensure output directory exists
                 output_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # Download the file directly to output path (using sanitized filename)
-                success = reo_camera.get_file(filename, str(output_path))
+                # Download the file directly to output path (using sanitized filename).
+                # get_file() streams with no read timeout, so bound it with a deadline.
+                success = call_with_deadline(reo_camera.get_file, 1800, filename, str(output_path))
 
                 if success and output_path.exists():
                     file_size = output_path.stat().st_size
@@ -834,7 +848,8 @@ class HistoricalRetrieval:
             return None
             
     def create_historical_timelapse(self, start_date: date, end_date: date,
-                                  upload_to_youtube: bool = True) -> List[Path]:
+                                  upload_to_youtube: bool = True,
+                                  throttle_seconds: Optional[float] = None) -> List[Path]:
         """
         Create timelapses for a range of historical dates
 
@@ -842,16 +857,24 @@ class HistoricalRetrieval:
             start_date: Start date for processing
             end_date: End date for processing
             upload_to_youtube: Whether to upload videos to YouTube
+            throttle_seconds: Pause after each day that contacted the camera, so
+                back-to-back sessions don't exhaust its concurrent-session limit.
+                Defaults to `historical.throttle_seconds` in config (0 = off).
 
         Returns:
             List of created video paths
         """
-        self.logger.info(f"Creating historical timelapses from {start_date} to {end_date}")
+        if throttle_seconds is None:
+            throttle_seconds = self.config.get('historical.throttle_seconds', 0)
+
+        self.logger.info(f"Creating historical timelapses from {start_date} to {end_date}"
+                         + (f" (throttle {throttle_seconds}s between camera days)" if throttle_seconds else ""))
 
         created_videos = []
         current_date = start_date
 
         while current_date <= end_date:
+            contacted_camera = False
             try:
                 self.logger.info(f"Processing {current_date}")
 
@@ -885,6 +908,7 @@ class HistoricalRetrieval:
                         frames = existing_frames
                     else:
                         # Retrieve historical footage
+                        contacted_camera = True
                         frames = self.retrieve_historical_sunset(current_date)
 
                     if frames and len(frames) > 10:  # Need minimum frames for video
@@ -967,6 +991,10 @@ class HistoricalRetrieval:
                 self.logger.error(f"Error processing {current_date}: {e}")
 
             current_date += timedelta(days=1)
+
+            if throttle_seconds and contacted_camera and current_date <= end_date:
+                self.logger.info(f"Throttling: waiting {throttle_seconds}s before {current_date}")
+                time.sleep(throttle_seconds)
 
         self.logger.info(f"Historical processing complete. Created {len(created_videos)} videos.")
         return created_videos

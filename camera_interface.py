@@ -16,6 +16,7 @@ from requests.auth import HTTPDigestAuth
 from PIL import Image
 import cv2
 import urllib3
+from reolink_utils import call_with_deadline, make_timeout_session
 
 # Disable SSL warnings for camera's self-signed certificate
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1378,8 +1379,9 @@ class CameraInterface:
             from reolinkapi import Camera as ReoCamera
             
             # Create Reolink API camera instance
-            reo_camera = ReoCamera(self.ip, self.username, self.password)
-            
+            reo_camera = ReoCamera(self.ip, self.username, self.password,
+                                   session=make_timeout_session())
+
             self.logger.info(f"Searching for recordings from {start_time} to {end_time} using Reolink API")
             
             # Get motion files in the time range
@@ -1414,7 +1416,9 @@ class CameraInterface:
                     self.logger.info(f"Downloading file {i+1}/{len(motion_files)}: {filename}")
                     
                     try:
-                        success = reo_camera.get_file(
+                        # get_file() streams with no read timeout, so bound it with a deadline
+                        success = call_with_deadline(
+                            reo_camera.get_file, 1800,
                             filename=filename,
                             output_path=str(save_path),
                             method='Playback'

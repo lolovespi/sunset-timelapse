@@ -89,8 +89,9 @@ def cmd_historical(args):
         
     # Process historical footage
     created_videos = retrieval.create_historical_timelapse(
-        start_date, end_date, 
-        upload_to_youtube=args.upload
+        start_date, end_date,
+        upload_to_youtube=args.upload,
+        throttle_seconds=args.throttle_seconds
     )
     
     if created_videos:
@@ -1018,6 +1019,9 @@ Examples:
                            help='Upload videos to YouTube')
     hist_parser.add_argument('--list', dest='list_available', action='store_true',
                            help='List available dates instead of processing')
+    hist_parser.add_argument('--throttle', dest='throttle_seconds', type=float, default=None,
+                           help='Seconds to pause between days that contact the camera '
+                                '(default: historical.throttle_seconds in config, 0 = off)')
     hist_parser.set_defaults(func=cmd_historical)
     
     # Test command
