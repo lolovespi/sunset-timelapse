@@ -8,7 +8,6 @@ import subprocess
 from datetime import datetime, date
 from pathlib import Path
 from typing import List, Optional, Tuple
-import ffmpeg
 from PIL import Image
 import json
 
@@ -225,22 +224,21 @@ class VideoProcessor:
                 return False
                 
             try:
-                # Build ffmpeg command using ffmpeg-python
-                input_stream = ffmpeg.input(str(list_file), format='concat', safe=0)
-                
-                # Apply video settings
-                output_stream = ffmpeg.output(
-                    input_stream,
+                # Build ffmpeg command (concat demuxer input, H.264 output)
+                args = [
+                    'ffmpeg', '-f', 'concat', '-safe', '0', '-i', str(list_file),
+                    '-b', str(self.bitrate),
+                    '-crf', '23',
+                    '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
+                    '-preset', 'medium',
+                    '-r', str(fps),  # Frame rate
+                    '-s', f'{self.width}x{self.height}',  # Resolution
+                    '-threads', str(self.threads),
+                    '-vcodec', str(self.codec),
                     str(output_path),
-                    vcodec=self.codec,
-                    r=fps,  # Frame rate
-                    pix_fmt='yuv420p',  # Pixel format for compatibility
-                    s=f'{self.width}x{self.height}',  # Resolution
-                    b=self.bitrate,  # Bitrate
-                    threads=self.threads,
-                    **{'preset': 'medium', 'crf': '23'}  # Quality settings
-                )
-                
+                    '-y',
+                ]
+
                 # Run ffmpeg with timeout to prevent hanging
                 self.logger.info("Starting video encoding...")
                 # Calculate reasonable timeout: base time + per-frame processing time
@@ -249,9 +247,6 @@ class VideoProcessor:
                 total_timeout = base_timeout + frame_timeout
                 
                 try:
-                    import subprocess
-                    # Convert ffmpeg-python to subprocess call with timeout
-                    args = ffmpeg.compile(output_stream, overwrite_output=True)
                     result = subprocess.run(args, capture_output=True, text=True, timeout=total_timeout)
                     
                     if result.returncode != 0:
@@ -280,11 +275,6 @@ class VideoProcessor:
                 if list_file and list_file.exists():
                     list_file.unlink()
                     
-        except ffmpeg.Error as e:
-            self.logger.error(f"FFmpeg error: {e}")
-            if hasattr(e, 'stderr') and e.stderr:
-                self.logger.error(f"FFmpeg stderr: {e.stderr.decode()}")
-            return False
         except Exception as e:
             self.logger.error(f"Failed to create timelapse: {e}")
             return False
@@ -437,7 +427,10 @@ class VideoProcessor:
             Dictionary with video information or None if failed
         """
         try:
-            probe = ffmpeg.probe(str(video_path))
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', str(video_path)],
+                capture_output=True, text=True, timeout=60, check=True)
+            probe = json.loads(result.stdout)
             
             # Extract video stream info
             video_stream = next((stream for stream in probe['streams'] 
