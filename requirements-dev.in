@@ -1,0 +1,8 @@
+# Development/testing tools, kept out of the Pi install. Regenerate with:
+#   pip-compile --strip-extras requirements-dev.in
+-c requirements.txt
+
+pytest
+pytest-cov
+black
+flake8

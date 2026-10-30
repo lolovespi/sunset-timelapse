@@ -1,0 +1,43 @@
+# Top-level dependencies (unpinned). Edit this file, then regenerate the pins:
+#   pip-compile --strip-extras requirements.in
+# Never edit requirements.txt by hand except the reolinkapi block at its end.
+
+# Core dependencies
+PyYAML
+python-dotenv
+requests
+Pillow
+
+# Computer Vision and SBS Analysis (Pi-optimized)
+opencv-python-headless  # Headless for Pi (smaller footprint)
+numpy  # Required for SBS mathematical operations
+scipy  # Statistical calculations for SBS metrics
+
+# Astronomy calculations
+astral
+
+# ONVIF camera control
+onvif-zeep
+zeep
+
+# Video processing
+ffmpeg-python
+
+# YouTube API
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+
+# Facebook API and AI caption generation
+anthropic
+
+# Scheduling (for Raspberry Pi)
+schedule
+
+# Logging and utilities
+colorlog
+tqdm
+
+# Reolink camera API: NOT listed here. It must be installed with --no-deps
+# (dependency conflicts on Pi), so it is pinned by hand at the end of requirements.txt.
