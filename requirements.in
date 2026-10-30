@@ -20,9 +20,6 @@ astral
 onvif-zeep
 zeep
 
-# Video processing
-ffmpeg-python
-
 # YouTube API
 google-auth
 google-auth-oauthlib
