@@ -46,7 +46,7 @@ An automated sunset timelapse system that captures daily sunset images via a **R
 ## Technology Stack
 
 - **Python 3** with `astral`, `opencv-python-headless`, `numpy/scipy`, `ffmpeg-python`
-- **Camera**: RTSP streaming, Reolink API, ONVIF protocol
+- **Camera**: RTSP streaming, Reolink API
 - **Cloud**: Google YouTube Data API v3, Google Drive API, OAuth 2.0
 - **Scheduling**: `schedule` library (Pi), systemd service
 - **Notifications**: SMTP email (Gmail compatible)

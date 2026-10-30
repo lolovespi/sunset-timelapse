@@ -90,7 +90,7 @@ If a step needs to change, edit `complete_daily_workflow` first — it's the con
 | `sunset_scheduler.py` | Orchestrator. `complete_daily_workflow`, `run_scheduler` (the systemd entry), `run_overnight_meteor_scan` |
 | `config_manager.py` | Loads `config.yaml` (or `config-pi.yaml` on the Pi) + `.env`. Centralizes secrets and paths |
 | `sunset_calculator.py` | Astral-based sunset times + capture windows |
-| `camera_interface.py` | ONVIF (port 8000) + Reolink API; capture, recording search, download |
+| `camera_interface.py` | RTSP capture + Reolink API; recording search, download |
 | `video_processor.py` | FFmpeg wrapper for assembling JPEGs into MP4 |
 | `youtube_uploader.py` | OAuth + upload; includes proactive token refresh and health alerts |
 | `facebook_uploader.py` | FB Page + Instagram + FB Reels posting. Also owns AI-caption generation (Anthropic). `_render_portrait_for_reel` handles 9:16 reformat |
@@ -118,7 +118,7 @@ If a step needs to change, edit `complete_daily_workflow` first — it's the con
 
 ## Dependency rules
 
-- Prefer the standard library. Use `zoneinfo` for time zones, never `pytz`. Use `datetime.now(timezone.utc)`, never `utcnow()` (or `utcfromtimestamp()`). `pytz` is installed only as a transitive dependency of `zeep`; do not import it.
+- Prefer the standard library. Use `zoneinfo` for time zones, never `pytz`. Use `datetime.now(timezone.utc)`, never `utcnow()` (or `utcfromtimestamp()`). Do not add `pytz`.
 - Never add a new dependency without asking the user first. When proposing one, confirm it exists on PyPI under that exact name, is actively maintained, and state the latest stable version.
 - All dependencies are pinned in `requirements.txt`, generated from `requirements.in` with `pip-compile --strip-extras requirements.in` (dev tools: `requirements-dev.in` → `requirements-dev.txt`). Never remove pins or hand-edit generated lines. `reolinkapi` is the exception: it is pinned by hand at the end of `requirements.txt` and installed with `--no-deps`; regenerating drops that block, so restore it.
 - Treat deprecation warnings from our own code as bugs to fix, not noise.

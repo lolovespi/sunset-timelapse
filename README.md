@@ -563,7 +563,7 @@ sunset-timelapse/
 ├── main.py                        # CLI entry point
 ├── config_manager.py              # Configuration and secrets management
 ├── sunset_calculator.py           # Astronomical calculations
-├── camera_interface.py            # Camera control via ONVIF
+├── camera_interface.py            # Camera capture via RTSP and Reolink API
 ├── video_processor.py             # Video creation with FFmpeg
 ├── youtube_uploader.py            # YouTube API integration
 ├── sunset_scheduler.py            # Main orchestrator (includes meteor scheduling)

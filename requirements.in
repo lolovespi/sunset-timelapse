@@ -16,10 +16,6 @@ scipy  # Statistical calculations for SBS metrics
 # Astronomy calculations
 astral
 
-# ONVIF camera control
-onvif-zeep
-zeep
-
 # YouTube API
 google-auth
 google-auth-oauthlib
