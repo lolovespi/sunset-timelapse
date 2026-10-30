@@ -46,7 +46,9 @@ data/
 # IDE and Claude Code
 .vscode/
 .idea/
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/agents/
 *.swp
 *.swo
 
