@@ -21,14 +21,6 @@ from reolink_utils import call_with_deadline, make_timeout_session
 # Disable SSL warnings for camera's self-signed certificate
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-try:
-    from onvif import ONVIFCamera
-    from onvif.exceptions import ONVIFError
-except ImportError:
-    logging.warning("ONVIF library not available. Camera control will be limited.")
-    ONVIFCamera = None
-    ONVIFError = Exception
-
 from config_manager import get_config
 from sunset_brilliance_score import SunsetBrillianceScore, FrameMetrics
 
@@ -43,14 +35,10 @@ class CameraInterface:
         """Initialize camera interface"""
         self.config = get_config()
         self.logger = logging.getLogger(__name__)
-        self.camera = None
-        self.media_service = None
-        self.imaging_service = None
         self._connected = False
         
         # Camera settings from config
         self.ip = self.config.get('camera.ip')
-        self.onvif_port = self.config.get('camera.onvif_port', 8000)
         self.rtsp_port = self.config.get('camera.rtsp_port', 554)
         
         # Get credentials securely
@@ -728,211 +716,6 @@ class CameraInterface:
         except Exception as e:
             self.logger.error(f"RTSP test failed: {e}")
             return False
-
-    def connect_onvif(self) -> bool:
-        """
-        Connect to camera via ONVIF for advanced features like replay
-        
-        Returns:
-            True if ONVIF connection successful, False otherwise
-        """
-        if not ONVIFCamera:
-            self.logger.error("ONVIF library not available")
-            return False
-            
-        try:
-            self.logger.info(f"Connecting to camera via ONVIF at {self.ip}:{self.onvif_port}")
-            
-            # Create ONVIF camera connection
-            self.camera = ONVIFCamera(
-                self.ip, 
-                self.onvif_port, 
-                self.username, 
-                self.password
-            )
-            
-            # Test connection by getting device information
-            device_service = self.camera.create_devicemgmt_service()
-            device_info = device_service.GetDeviceInformation()
-            
-            self.logger.info(f"ONVIF connected - {device_info.Manufacturer} {device_info.Model}")
-            
-            # Get media service for stream info
-            self.media_service = self.camera.create_media_service()
-            
-            self._connected = True
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"ONVIF connection failed: {e}")
-            self._connected = False
-            return False
-
-    def get_recordings(self, start_time: datetime, end_time: datetime) -> List[dict]:
-        """
-        Search for recorded videos in the specified time range via ONVIF
-        
-        Args:
-            start_time: Start time for search
-            end_time: End time for search
-            
-        Returns:
-            List of recording information dictionaries
-        """
-        if not self.camera:
-            self.logger.error("Camera not connected via ONVIF")
-            return []
-            
-        try:
-            # Create search service
-            search_service = self.camera.create_search_service()
-            
-            # Create search parameters
-            search_params = {
-                'StreamType': 'RtspUnicast',
-                'Scope': {
-                    'IncludeRecordings': True,
-                    'RecordingInformationFilter': {}
-                },
-                'MaxMatches': 100,
-                'StartPoint': start_time.isoformat(),
-                'EndPoint': end_time.isoformat()
-            }
-            
-            self.logger.info(f"Searching for recordings from {start_time} to {end_time}")
-            
-            # Find recordings
-            search_result = search_service.FindRecordings(search_params)
-            
-            recordings = []
-            if hasattr(search_result, 'RecordingInformation'):
-                for recording in search_result.RecordingInformation:
-                    recordings.append({
-                        'token': recording.RecordingToken,
-                        'start_time': recording.EarliestRecording,
-                        'end_time': recording.LatestRecording,
-                        'source': recording.Source
-                    })
-                    
-            self.logger.info(f"Found {len(recordings)} recordings")
-            return recordings
-            
-        except Exception as e:
-            self.logger.error(f"Failed to search recordings: {e}")
-            return []
-
-    def download_recording(self, recording_token: str, save_path: Path) -> bool:
-        """
-        Download a recorded video via ONVIF replay
-        
-        Args:
-            recording_token: Token identifying the recording
-            save_path: Path where to save the downloaded video
-            
-        Returns:
-            True if download successful, False otherwise
-        """
-        if not self.camera:
-            self.logger.error("Camera not connected via ONVIF")
-            return False
-            
-        try:
-            # Create replay service
-            replay_service = self.camera.create_replay_service()
-            
-            # Set up stream configuration
-            stream_setup = {
-                'Stream': 'RTP-Unicast',
-                'Transport': {
-                    'Protocol': 'RTSP'
-                }
-            }
-            
-            # Get replay URI
-            replay_params = {
-                'RecordingToken': recording_token,
-                'StreamSetup': stream_setup
-            }
-            
-            replay_result = replay_service.GetReplayUri(replay_params)
-            replay_uri = replay_result.Uri
-            
-            self.logger.info(f"Got replay URI: {self._sanitize_rtsp_url_for_logging(replay_uri)}")
-            
-            # Download video using ffmpeg
-            import subprocess
-            
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', replay_uri,
-                '-c', 'copy',  # Stream copy to avoid re-encoding
-                '-avoid_negative_ts', 'make_zero',
-                str(save_path)
-            ]
-            
-            # Create sanitized command for logging
-            cmd_safe = cmd.copy()
-            cmd_safe[cmd_safe.index(replay_uri)] = self._sanitize_rtsp_url_for_logging(replay_uri)
-            self.logger.info(f"Downloading recording: {' '.join(cmd_safe)}")
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # 30 min timeout
-            
-            if result.returncode == 0:
-                self.logger.info(f"Successfully downloaded recording to {save_path}")
-                return True
-            else:
-                self.logger.error(f"Failed to download recording: {self._sanitize_rtsp_url_for_logging(result.stderr)}")
-                return False
-                
-        except subprocess.TimeoutExpired:
-            self.logger.error("Recording download timed out")
-            return False
-        except Exception as e:
-            self.logger.error(f"Failed to download recording: {e}")
-            return False
-
-    def download_recordings_by_time(self, start_time: datetime, end_time: datetime, 
-                                   save_dir: Path) -> List[Path]:
-        """
-        Download all recordings in a time range
-        
-        Args:
-            start_time: Start time for recordings
-            end_time: End time for recordings  
-            save_dir: Directory to save downloaded videos
-            
-        Returns:
-            List of paths to downloaded video files
-        """
-        downloaded_files = []
-        
-        # Ensure ONVIF connection
-        if not self.camera and not self.connect_onvif():
-            self.logger.error("Failed to connect via ONVIF for recording download")
-            return downloaded_files
-            
-        # Search for recordings
-        recordings = self.get_recordings(start_time, end_time)
-        
-        if not recordings:
-            self.logger.warning("No recordings found in specified time range")
-            return downloaded_files
-            
-        # Download each recording
-        save_dir.mkdir(parents=True, exist_ok=True)
-        
-        for i, recording in enumerate(recordings):
-            # Generate filename
-            filename = f"recording_{start_time.strftime('%Y%m%d_%H%M')}_{i+1}.mp4"
-            save_path = save_dir / filename
-            
-            if self.download_recording(recording['token'], save_path):
-                downloaded_files.append(save_path)
-            else:
-                self.logger.warning(f"Failed to download recording {i+1}")
-                
-        self.logger.info(f"Downloaded {len(downloaded_files)}/{len(recordings)} recordings")
-        return downloaded_files
 
     def download_reolink_recording(self, start_time: datetime, end_time: datetime, 
                                    save_path: Path) -> bool:
