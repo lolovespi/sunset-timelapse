@@ -116,6 +116,15 @@ If a step needs to change, edit `complete_daily_workflow` first — it's the con
 
 **Caption voice (enforced by the prompt and by user preference):** direct, dry, observational. No hype, no slang ("vibes", "epic", "literal magic"), no repeating the word "muted". When editing the prompt in `_build_caption_prompt`, preserve this tone — it has been tuned through multiple iterations. Vision-based captions are known to be meaningfully better than text-only; do not regress to text-only as a default.
 
+## Dependency rules
+
+- Prefer the standard library. Use `zoneinfo` for time zones, never `pytz`. Use `datetime.now(timezone.utc)`, never `utcnow()` (or `utcfromtimestamp()`). `pytz` is installed only as a transitive dependency of `zeep`; do not import it.
+- Never add a new dependency without asking the user first. When proposing one, confirm it exists on PyPI under that exact name, is actively maintained, and state the latest stable version.
+- All dependencies are pinned in `requirements.txt`, generated from `requirements.in` with `pip-compile --strip-extras requirements.in` (dev tools: `requirements-dev.in` → `requirements-dev.txt`). Never remove pins or hand-edit generated lines. `reolinkapi` is the exception: it is pinned by hand at the end of `requirements.txt` and installed with `--no-deps`; regenerating drops that block, so restore it.
+- Treat deprecation warnings from our own code as bugs to fix, not noise.
+- Run `pip-audit -r requirements.txt` (and `-r requirements-dev.txt`) after any dependency change.
+- Dependabot opens weekly pip update PRs; verify on the Pi (`python main.py test --camera --youtube --sunset`) before deploying a bump.
+
 ## Known issues and gotchas
 
 **Meteor parallel-processing bottleneck.** `meteor_detector.py` uses `ProcessPoolExecutor` (3 workers) on desktop and sequential on Pi (detected via `platform.machine()` and `/proc/device-tree/model`). Workers re-initialize heavy CV objects per video → roughly 36× slowdown vs. an ideal pool. Full-night scans take ~12h instead of ~20min. Workaround: use targeted time windows. Real fix would refactor workers to reuse state.

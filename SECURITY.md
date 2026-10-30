@@ -129,15 +129,35 @@ sudo ufw allow from 192.168.6.0/24  # Allow camera subnet
 
 ### 4. **Dependency Security**
 
-```bash
-# Check for vulnerable dependencies
-pip install safety
-safety check -r requirements.txt
+All dependencies are pinned to exact versions. Edit `requirements.in` (runtime) or
+`requirements-dev.in` (dev tools), then regenerate the pins with pip-tools:
 
-# Or use pip-audit
-pip install pip-audit
-pip-audit -r requirements.txt
+```bash
+pip install pip-tools pip-audit
+pip-compile --strip-extras requirements.in        # -> requirements.txt
+pip-compile --strip-extras requirements-dev.in    # -> requirements-dev.txt
 ```
+
+`reolinkapi` is pinned by hand at the end of `requirements.txt` and must be installed
+with `--no-deps`; re-add that block if regeneration removes it.
+
+Rules:
+
+- Never add a dependency without review: confirm the exact PyPI name, that it is actively
+  maintained, and its latest stable version.
+- Never remove pins.
+- Run `pip-audit` after every dependency change and before deploying to the Pi:
+
+```bash
+pip-audit -r requirements.txt
+pip-audit -r requirements-dev.txt
+```
+
+- Dependabot (`.github/dependabot.yml`) opens weekly pip update PRs. Review the changelog,
+  run `pip-audit`, and test on the Pi before merging.
+- Prefer the standard library (`zoneinfo`, not `pytz`; `datetime.now(timezone.utc)`, not
+  `utcnow()`), and treat deprecation warnings in our own code as bugs.
+- Project CodeGuard secure-coding rules for Claude Code live in `.claude/skills/codeguard/`.
 
 ### 5. **Monitoring**
 
