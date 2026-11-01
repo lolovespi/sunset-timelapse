@@ -7,7 +7,7 @@ click==8.3.1
     # via black
 coverage==7.13.5
     # via pytest-cov
-flake8==7.3.0
+flake8==7.5.0
     # via -r requirements-dev.in
 iniconfig==2.3.0
     # via pytest
@@ -22,16 +22,14 @@ packaging==26.0
 pathspec==1.0.4
     # via black
 platformdirs==4.9.4
-    # via
-    #   -c requirements.txt
-    #   black
+    # via black
 pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-pycodestyle==2.14.0
+pycodestyle==2.15.0
     # via flake8
-pyflakes==3.4.0
+pyflakes==4.1.0
     # via flake8
 pygments==2.21.0
     # via pytest
