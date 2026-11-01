@@ -72,7 +72,7 @@ numpy==2.4.3
     #   scipy
 oauthlib==4.0.0
     # via requests-oauthlib
-opencv-python-headless==4.13.0.92
+opencv-python-headless==5.0.0.93
     # via -r requirements.in
 pillow==13.0.0
     # via -r requirements.in
@@ -126,11 +126,3 @@ uritemplate==4.2.0
     # via google-api-python-client
 urllib3==2.8.0
     # via requests
-
-# Reolink camera API: pinned by hand to the Raspberry Pi's version. Not resolved by
-# pip-compile because it must be installed without its dependencies (conflicts on Pi):
-#   pip install reolinkapi==0.4.1 --force-reinstall --no-deps
-# Its runtime dependencies are PySocks, PyYAML, requests and setuptools (PySocks is
-# pinned here; the others are pinned above or provided by the venv).
-reolinkapi==0.4.1
-PySocks==1.7.1
