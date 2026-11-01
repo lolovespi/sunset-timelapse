@@ -97,7 +97,7 @@ pyparsing==3.3.2
     # via httplib2
 python-dotenv==1.2.2
     # via -r requirements.in
-pyyaml==6.0.2
+pyyaml==6.0.3
     # via -r requirements.in
 requests==2.34.2
     # via
@@ -126,11 +126,3 @@ uritemplate==4.2.0
     # via google-api-python-client
 urllib3==2.8.0
     # via requests
-
-# Reolink camera API: pinned by hand to the Raspberry Pi's version. Not resolved by
-# pip-compile because it must be installed without its dependencies (conflicts on Pi):
-#   pip install reolinkapi==0.4.1 --force-reinstall --no-deps
-# Its runtime dependencies are PySocks, PyYAML, requests and setuptools (PySocks is
-# pinned here; the others are pinned above or provided by the venv).
-reolinkapi==0.4.1
-PySocks==1.7.1
